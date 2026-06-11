@@ -194,6 +194,20 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     this.refreshView();
     new import_obsidian.Notice(`\u5DF2\u6DFB\u52A0 ${attachmentLines.length} \u4E2A\u9644\u4EF6`);
   }
+  async deleteTaskAttachment(task, link) {
+    const nextAttachments = removeMatchingAttachment(task.attachmentLines, link);
+    if (nextAttachments.length === task.attachmentLines.length) {
+      new import_obsidian.Notice("\u672A\u627E\u5230\u5BF9\u5E94\u9644\u4EF6\u884C");
+      return;
+    }
+    const nextBlock = [
+      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      ...normalizeAttachmentInput(nextAttachments.join("\n"))
+    ];
+    await this.replaceTaskBlock(task, nextBlock);
+    this.refreshView();
+    new import_obsidian.Notice("\u5DF2\u5220\u9664\u9644\u4EF6");
+  }
   async deleteTask(task) {
     await this.removeTaskBlock(task);
     this.refreshView();
@@ -620,11 +634,19 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     if (task.links.length > 0) {
       const links = details.createDiv({ cls: "atb-link-list" });
       for (const link of task.links) {
-        const button = links.createEl("button", { cls: `atb-link-btn ${link.type === "file" ? "is-file" : ""}`, text: link.label });
+        const row = links.createDiv({ cls: "atb-link-row" });
+        const button = row.createEl("button", { cls: `atb-link-btn ${link.type === "file" ? "is-file" : ""}`, text: link.label });
         button.setAttribute("title", link.url);
         button.addEventListener("click", async (event) => {
           event.stopPropagation();
           await openAttachment(link);
+        });
+        const remove = row.createEl("button", { cls: "atb-link-remove", text: "\xD7" });
+        remove.setAttribute("title", "\u5220\u9664\u9644\u4EF6");
+        remove.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await this.plugin.deleteTaskAttachment(task, link);
+          await this.renderTasks();
         });
       }
     } else {
@@ -1045,6 +1067,31 @@ function getFilePath(file) {
 function appendAttachmentText(current, additions) {
   const next = additions.map((line) => line.trim()).filter(Boolean).join("\n");
   return [current.trim(), next].filter(Boolean).join("\n");
+}
+function removeMatchingAttachment(attachmentLines, link) {
+  const next = [];
+  let removed = false;
+  for (const line of attachmentLines) {
+    const cleaned = cleanupAttachmentLine(line);
+    if (!removed && attachmentLineMatchesLink(cleaned, link)) {
+      removed = true;
+      continue;
+    }
+    if (cleaned) next.push(cleaned);
+  }
+  return next;
+}
+function attachmentLineMatchesLink(line, link) {
+  const candidates = /* @__PURE__ */ new Set([link.url]);
+  if (link.type === "file") {
+    candidates.add(fileUrlToPath(link.url));
+    candidates.add(pathToFileUrl(link.url));
+  }
+  for (const candidate of candidates) {
+    if (candidate && line.includes(candidate)) return true;
+  }
+  const localFile = extractLocalFileAttachment(line);
+  return localFile?.url === link.url;
 }
 async function ensureFolder(app, folderPath) {
   const parts = folderPath.split("/").filter(Boolean);

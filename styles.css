@@ -488,8 +488,16 @@
   gap: 5px;
 }
 
+.atb-link-row {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  min-width: 0;
+}
+
 .atb-link-btn {
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   min-height: 26px;
   padding: 4px 7px;
   border: 1px solid var(--background-modifier-border);
@@ -504,8 +512,27 @@
   cursor: pointer;
 }
 
+.atb-link-remove {
+  flex: 0 0 26px;
+  width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: 1px solid color-mix(in oklab, #dc2626 40%, var(--background-modifier-border));
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: #dc2626;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .atb-link-btn:hover {
   border-color: var(--interactive-accent);
+}
+
+.atb-link-remove:hover {
+  background: color-mix(in oklab, #dc2626 12%, var(--background-primary));
+  border-color: #dc2626;
 }
 
 .atb-link-btn.is-file {

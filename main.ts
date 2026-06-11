@@ -269,6 +269,23 @@ export default class AgentTaskBoardPlugin extends Plugin {
     new Notice(`已添加 ${attachmentLines.length} 个附件`);
   }
 
+  async deleteTaskAttachment(task: TaskItem, link: TaskLink) {
+    const nextAttachments = removeMatchingAttachment(task.attachmentLines, link);
+    if (nextAttachments.length === task.attachmentLines.length) {
+      new Notice("未找到对应附件行");
+      return;
+    }
+
+    const nextBlock = [
+      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      ...normalizeAttachmentInput(nextAttachments.join("\n"))
+    ];
+
+    await this.replaceTaskBlock(task, nextBlock);
+    this.refreshView();
+    new Notice("已删除附件");
+  }
+
   async deleteTask(task: TaskItem) {
     await this.removeTaskBlock(task);
     this.refreshView();
@@ -740,11 +757,19 @@ class AgentTaskBoardView extends ItemView {
     if (task.links.length > 0) {
       const links = details.createDiv({ cls: "atb-link-list" });
       for (const link of task.links) {
-        const button = links.createEl("button", { cls: `atb-link-btn ${link.type === "file" ? "is-file" : ""}`, text: link.label });
+        const row = links.createDiv({ cls: "atb-link-row" });
+        const button = row.createEl("button", { cls: `atb-link-btn ${link.type === "file" ? "is-file" : ""}`, text: link.label });
         button.setAttribute("title", link.url);
         button.addEventListener("click", async (event) => {
           event.stopPropagation();
           await openAttachment(link);
+        });
+        const remove = row.createEl("button", { cls: "atb-link-remove", text: "×" });
+        remove.setAttribute("title", "删除附件");
+        remove.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          await this.plugin.deleteTaskAttachment(task, link);
+          await this.renderTasks();
         });
       }
     } else {
@@ -1337,6 +1362,37 @@ function getFilePath(file: File) {
 function appendAttachmentText(current: string, additions: string[]) {
   const next = additions.map((line) => line.trim()).filter(Boolean).join("\n");
   return [current.trim(), next].filter(Boolean).join("\n");
+}
+
+function removeMatchingAttachment(attachmentLines: string[], link: TaskLink) {
+  const next: string[] = [];
+  let removed = false;
+
+  for (const line of attachmentLines) {
+    const cleaned = cleanupAttachmentLine(line);
+    if (!removed && attachmentLineMatchesLink(cleaned, link)) {
+      removed = true;
+      continue;
+    }
+    if (cleaned) next.push(cleaned);
+  }
+
+  return next;
+}
+
+function attachmentLineMatchesLink(line: string, link: TaskLink) {
+  const candidates = new Set<string>([link.url]);
+  if (link.type === "file") {
+    candidates.add(fileUrlToPath(link.url));
+    candidates.add(pathToFileUrl(link.url));
+  }
+
+  for (const candidate of candidates) {
+    if (candidate && line.includes(candidate)) return true;
+  }
+
+  const localFile = extractLocalFileAttachment(line);
+  return localFile?.url === link.url;
 }
 
 async function ensureFolder(app: App, folderPath: string) {
