@@ -1,0 +1,10 @@
+{
+  "id": "agent-task-board",
+  "name": "Agent Task Board",
+  "version": "0.3.0",
+  "minAppVersion": "1.5.0",
+  "description": "面向人类调度多个 agent 和协作者的 TODO 管理面板。",
+  "author": "Yuanhang",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,16 @@
+{
+  "name": "obsidian-agent-task-board",
+  "version": "0.3.0",
+  "scripts": {
+    "build": "esbuild main.ts --bundle --external:obsidian --format=cjs --platform=node --outfile=main.js --sourcemap",
+    "dev": "esbuild main.ts --bundle --watch --external:obsidian --format=cjs --platform=node --outfile=main.js --sourcemap",
+    "typecheck": "tsc --noEmit",
+    "package": "zip -r agent-task-board-$npm_package_version.zip main.js manifest.json styles.css"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.23.0",
+    "obsidian": "latest",
+    "typescript": "^5.4.0"
+  }
+}
