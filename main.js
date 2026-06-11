@@ -817,7 +817,7 @@ var CreateTaskModal = class extends import_obsidian.Modal {
     new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u3001\u672C\u673A\u6587\u4EF6\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
       text.inputEl.rows = 4;
       text.setValue(this.attachmentText);
-      text.setPlaceholder("PR: https://...\n\u672C\u673A\u6587\u4EF6: /Users/...");
+      text.setPlaceholder("PR: https://...\n\u672C\u673A\u6587\u4EF6: file:///Users/...");
       text.onChange((value) => this.attachmentText = value);
     });
     addLocalFilePicker(contentEl, (paths) => {
@@ -1044,7 +1044,7 @@ function addLocalFilePicker(container, onSelect) {
 }
 function collectFileInputPaths(files) {
   if (!files) return [];
-  return Array.from(files).map((file) => getFilePath(file)).filter((path) => Boolean(path));
+  return Array.from(files).map((file) => getFilePath(file)).filter((path) => Boolean(path)).map((path) => pathToFileUrl(path));
 }
 function collectDroppedFileAttachments(dataTransfer) {
   if (!dataTransfer) return [];
@@ -1188,16 +1188,11 @@ function extractLocalFileAttachment(line) {
 }
 function parseLocalFilePath(value) {
   const cleaned = trimUrl(value.trim());
-  if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
   if (isFileAttachmentUrl(cleaned)) return cleaned;
-  if (/^\/(?!\/)/.test(cleaned) || /^~\//.test(cleaned)) return cleaned;
-  if (/^[a-zA-Z]:[\\/]/.test(cleaned)) return cleaned;
-  if (/^\\\\[^\\]+\\[^\\]+/.test(cleaned)) return cleaned;
   return null;
 }
 function stripAttachmentLabel(value) {
   if (hasUrlScheme(value)) return value;
-  if (/^[a-zA-Z]:[\\/]/.test(value)) return value;
   return value.replace(/^[^:：]{1,40}[:：]\s*/, "");
 }
 function inferLocalFileLabel(line, path) {

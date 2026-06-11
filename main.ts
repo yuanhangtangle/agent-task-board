@@ -989,7 +989,7 @@ class CreateTaskModal extends Modal {
       .addTextArea((text) => {
         text.inputEl.rows = 4;
         text.setValue(this.attachmentText);
-        text.setPlaceholder("PR: https://...\n本机文件: /Users/...");
+        text.setPlaceholder("PR: https://...\n本机文件: file:///Users/...");
         text.onChange((value) => this.attachmentText = value);
       });
 
@@ -1328,7 +1328,8 @@ function collectFileInputPaths(files: FileList | null) {
   if (!files) return [];
   return Array.from(files)
     .map((file) => getFilePath(file))
-    .filter((path): path is string => Boolean(path));
+    .filter((path): path is string => Boolean(path))
+    .map((path) => pathToFileUrl(path));
 }
 
 function collectDroppedFileAttachments(dataTransfer: DataTransfer | null | undefined) {
@@ -1509,17 +1510,12 @@ function extractLocalFileAttachment(line: string): TaskLink | null {
 
 function parseLocalFilePath(value: string) {
   const cleaned = trimUrl(value.trim());
-  if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
   if (isFileAttachmentUrl(cleaned)) return cleaned;
-  if (/^\/(?!\/)/.test(cleaned) || /^~\//.test(cleaned)) return cleaned;
-  if (/^[a-zA-Z]:[\\/]/.test(cleaned)) return cleaned;
-  if (/^\\\\[^\\]+\\[^\\]+/.test(cleaned)) return cleaned;
   return null;
 }
 
 function stripAttachmentLabel(value: string) {
   if (hasUrlScheme(value)) return value;
-  if (/^[a-zA-Z]:[\\/]/.test(value)) return value;
   return value.replace(/^[^:：]{1,40}[:：]\s*/, "");
 }
 
