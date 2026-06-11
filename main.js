@@ -181,6 +181,19 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     this.refreshView();
     new import_obsidian.Notice("\u5DF2\u66F4\u65B0\u4EFB\u52A1");
   }
+  async appendTaskAttachments(task, attachmentLines) {
+    const nextAttachments = [
+      ...task.attachmentLines.map((line) => cleanupAttachmentLine(line)).filter(Boolean),
+      ...attachmentLines.map((line) => line.trim()).filter(Boolean)
+    ];
+    const nextBlock = [
+      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      ...normalizeAttachmentInput(nextAttachments.join("\n"))
+    ];
+    await this.replaceTaskBlock(task, nextBlock);
+    this.refreshView();
+    new import_obsidian.Notice(`\u5DF2\u6DFB\u52A0 ${attachmentLines.length} \u4E2A\u9644\u4EF6`);
+  }
   async deleteTask(task) {
     await this.removeTaskBlock(task);
     this.refreshView();
@@ -520,6 +533,13 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       card.removeClass("insert-before");
       card.removeClass("insert-after");
       const payload = ev.dataTransfer?.getData("application/json");
+      const hasDroppedFiles = (ev.dataTransfer?.files.length ?? 0) > 0;
+      const fileAttachments = !payload || hasDroppedFiles ? collectDroppedFileAttachments(ev.dataTransfer) : [];
+      if (fileAttachments.length > 0) {
+        await this.plugin.appendTaskAttachments(task, fileAttachments);
+        await this.renderTasks();
+        return;
+      }
       if (!payload) return;
       try {
         const data = JSON.parse(payload);
@@ -583,7 +603,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     });
     const linkIndicator = footer.createEl("button", {
       cls: `atb-link-indicator ${task.links.length === 0 ? "is-empty" : ""}`,
-      text: `\u94FE\u63A5 ${task.links.length}`
+      text: `\u9644\u4EF6 ${task.links.length}`
     });
     linkIndicator.setAttribute("title", isExpanded ? "\u6536\u8D77\u9644\u4EF6" : "\u5C55\u5F00\u9644\u4EF6");
     linkIndicator.addEventListener("click", (event) => {
@@ -600,15 +620,15 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     if (task.links.length > 0) {
       const links = details.createDiv({ cls: "atb-link-list" });
       for (const link of task.links) {
-        const button = links.createEl("button", { cls: "atb-link-btn", text: link.label });
+        const button = links.createEl("button", { cls: `atb-link-btn ${link.type === "file" ? "is-file" : ""}`, text: link.label });
         button.setAttribute("title", link.url);
-        button.addEventListener("click", (event) => {
+        button.addEventListener("click", async (event) => {
           event.stopPropagation();
-          window.open(link.url, "_blank");
+          await openAttachment(link);
         });
       }
     } else {
-      details.createDiv({ cls: "atb-detail-empty", text: "\u65E0\u9644\u4EF6\u94FE\u63A5" });
+      details.createDiv({ cls: "atb-detail-empty", text: "\u65E0\u9644\u4EF6" });
     }
     const actions = details.createDiv({ cls: "atb-detail-actions" });
     const editButton = actions.createEl("button", { text: "\u7F16\u8F91" });
@@ -774,17 +794,23 @@ var CreateTaskModal = class extends import_obsidian.Modal {
     contentEl.createEl("h2", { text: "\u65B0\u589E\u4EFB\u52A1" });
     new import_obsidian.Setting(contentEl).setName("\u4EFB\u52A1").addTextArea((text) => {
       text.inputEl.rows = 4;
+      text.setValue(this.taskText);
       text.setPlaceholder("\u5199\u4E0B\u8981\u5904\u7406\u7684 TODO\uFF0C\u53EF\u5305\u542B #tag \u548C @who");
       text.onChange((value) => this.taskText = value);
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
+    new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u3001\u672C\u673A\u6587\u4EF6\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
       text.inputEl.rows = 4;
-      text.setPlaceholder("PR: https://...\n\u6587\u6863: https://...");
+      text.setValue(this.attachmentText);
+      text.setPlaceholder("PR: https://...\n\u672C\u673A\u6587\u4EF6: /Users/...");
       text.onChange((value) => this.attachmentText = value);
     });
+    addLocalFilePicker(contentEl, (paths) => {
+      this.attachmentText = appendAttachmentText(this.attachmentText, paths);
+      this.onOpen();
+    });
     new import_obsidian.Setting(contentEl).setName("\u5206\u7C7B").addDropdown((dropdown) => {
-      dropdown.addOption("foreground", "\u524D\u53F0\u4EFB\u52A1").addOption("agent", "Agent \u4EFB\u52A1").addOption("collab", "\u534F\u4F5C\u4EFB\u52A1").addOption("inqueue", "\u5165\u961F\u4EFB\u52A1").addOption("pool", "\u4EFB\u52A1\u6C60").setValue(this.initialCategory).onChange((value) => this.category = value);
+      dropdown.addOption("foreground", "\u524D\u53F0\u4EFB\u52A1").addOption("agent", "Agent \u4EFB\u52A1").addOption("collab", "\u534F\u4F5C\u4EFB\u52A1").addOption("inqueue", "\u5165\u961F\u4EFB\u52A1").addOption("pool", "\u4EFB\u52A1\u6C60").setValue(this.category).onChange((value) => this.category = value);
     });
     new import_obsidian.Setting(contentEl).setName("\u76EE\u6807\u6587\u4EF6").addText((text) => {
       text.setValue(this.targetFile);
@@ -822,10 +848,14 @@ var EditTaskModal = class extends import_obsidian.Modal {
       text.onChange((value) => this.rawText = value);
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
-    new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
+    new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u3001\u672C\u673A\u6587\u4EF6\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
       text.inputEl.rows = 6;
       text.setValue(this.attachmentText);
       text.onChange((value) => this.attachmentText = value);
+    });
+    addLocalFilePicker(contentEl, (paths) => {
+      this.attachmentText = appendAttachmentText(this.attachmentText, paths);
+      this.onOpen();
     });
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "\u4FDD\u5B58" });
@@ -979,6 +1009,43 @@ function normalizeAttachmentInput(value) {
 function cleanupAttachmentLine(line) {
   return line.trim().replace(/^[-*]\s+/, "").trim();
 }
+function addLocalFilePicker(container, onSelect) {
+  const wrapper = container.createDiv({ cls: "atb-file-picker" });
+  const button = wrapper.createEl("button", { type: "button", text: "\u6DFB\u52A0\u672C\u673A\u6587\u4EF6" });
+  const hint = wrapper.createSpan({ text: "\u4E5F\u53EF\u4EE5\u628A\u6587\u4EF6\u62D6\u5230\u4EFB\u52A1\u5361\u7247\u4E0A" });
+  const input = wrapper.createEl("input", { type: "file" });
+  input.multiple = true;
+  input.style.display = "none";
+  button.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => {
+    const paths = collectFileInputPaths(input.files);
+    if (paths.length === 0) {
+      new import_obsidian.Notice("\u6CA1\u6709\u8BFB\u53D6\u5230\u672C\u673A\u6587\u4EF6\u8DEF\u5F84");
+      return;
+    }
+    onSelect(paths);
+    input.value = "";
+  });
+}
+function collectFileInputPaths(files) {
+  if (!files) return [];
+  return Array.from(files).map((file) => getFilePath(file)).filter((path) => Boolean(path));
+}
+function collectDroppedFileAttachments(dataTransfer) {
+  if (!dataTransfer) return [];
+  const paths = collectFileInputPaths(dataTransfer.files);
+  const uriList = dataTransfer.getData("text/uri-list").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && isFileAttachmentUrl(line));
+  const plainTextPaths = dataTransfer.getData("text/plain").split(/\r?\n/).map((line) => line.trim()).filter((line) => parseLocalFilePath(line));
+  return Array.from(/* @__PURE__ */ new Set([...paths, ...uriList, ...plainTextPaths]));
+}
+function getFilePath(file) {
+  const maybePath = file.path;
+  return typeof maybePath === "string" && maybePath.trim() ? maybePath.trim() : null;
+}
+function appendAttachmentText(current, additions) {
+  const next = additions.map((line) => line.trim()).filter(Boolean).join("\n");
+  return [current.trim(), next].filter(Boolean).join("\n");
+}
 async function ensureFolder(app, folderPath) {
   const parts = folderPath.split("/").filter(Boolean);
   let current = "";
@@ -1040,14 +1107,14 @@ function extractCollaborators(raw) {
 function extractLinks(lines) {
   const links = [];
   const seen = /* @__PURE__ */ new Set();
-  const markdownLinkRe = /\[([^\]]+)\]\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+)\)/g;
-  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+)/g;
+  const markdownLinkRe = /\[([^\]]+)\]((?:\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+|file:\/\/[^\s)]+)\)))/g;
+  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+|file:\/\/[^\s<>)\]]+)/g;
   for (const line of lines) {
     let markdownMatch;
     while ((markdownMatch = markdownLinkRe.exec(line)) !== null) {
-      const url = trimUrl(markdownMatch[2]);
+      const url = trimUrl(markdownMatch[3]);
       if (!seen.has(url)) {
-        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url });
+        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
         seen.add(url);
       }
     }
@@ -1055,12 +1122,68 @@ function extractLinks(lines) {
     while ((urlMatch = urlRe.exec(line)) !== null) {
       const url = trimUrl(urlMatch[1]);
       if (!seen.has(url)) {
-        links.push({ label: inferLinkLabel(line, url), url });
+        links.push({ label: inferLinkLabel(line, url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
         seen.add(url);
       }
     }
+    const localFile = extractLocalFileAttachment(line);
+    if (localFile && !seen.has(localFile.url)) {
+      links.push(localFile);
+      seen.add(localFile.url);
+    }
   }
   return links;
+}
+function extractLocalFileAttachment(line) {
+  const cleaned = cleanupAttachmentLine(line);
+  const path = parseLocalFilePath(cleaned) ?? parseLocalFilePath(stripAttachmentLabel(cleaned));
+  if (!path) return null;
+  return {
+    label: inferLocalFileLabel(cleaned, path),
+    url: path,
+    type: "file"
+  };
+}
+function parseLocalFilePath(value) {
+  const cleaned = trimUrl(value.trim());
+  if (isFileAttachmentUrl(cleaned)) return cleaned;
+  if (/^(\/|~\/)/.test(cleaned)) return cleaned;
+  if (/^[a-zA-Z]:[\\/]/.test(cleaned)) return cleaned;
+  if (/^\\\\[^\\]+\\[^\\]+/.test(cleaned)) return cleaned;
+  return null;
+}
+function stripAttachmentLabel(value) {
+  if (/^[a-zA-Z]:[\\/]/.test(value)) return value;
+  return value.replace(/^[^:：]{1,40}[:：]\s*/, "");
+}
+function inferLocalFileLabel(line, path) {
+  const beforePath = line.includes(path) ? line.slice(0, line.indexOf(path)) : "";
+  const cleaned = cleanupAttachmentLine(beforePath).replace(/[:：-]\s*$/, "").trim();
+  return cleaned || linkFallbackLabel(path);
+}
+async function openAttachment(link) {
+  if (link.type !== "file") {
+    window.open(link.url, "_blank");
+    return;
+  }
+  const shell = getElectronShell();
+  if (shell) {
+    const target = fileUrlToPath(link.url);
+    const error = await shell.openPath(target);
+    if (error) new import_obsidian.Notice(`\u65E0\u6CD5\u6253\u5F00\u9644\u4EF6\uFF1A${error}`);
+    return;
+  }
+  window.open(isFileAttachmentUrl(link.url) ? link.url : pathToFileUrl(link.url), "_blank");
+}
+function getElectronShell() {
+  const req = window.require;
+  if (!req) return null;
+  try {
+    const electron = req("electron");
+    return electron.shell ?? null;
+  } catch {
+    return null;
+  }
 }
 function inferLinkLabel(line, url) {
   const beforeUrl = line.slice(0, line.indexOf(url));
@@ -1068,6 +1191,10 @@ function inferLinkLabel(line, url) {
   return cleaned || linkFallbackLabel(url);
 }
 function linkFallbackLabel(url) {
+  if (isFileAttachmentUrl(url) || parseLocalFilePath(url)) {
+    const path = fileUrlToPath(url);
+    return path.split(/[\\/]/).filter(Boolean).pop() || path.slice(0, 60);
+  }
   try {
     const parsed = new URL(url);
     return parsed.hostname || url.slice(0, 60);
@@ -1077,6 +1204,24 @@ function linkFallbackLabel(url) {
 }
 function trimUrl(url) {
   return url.replace(/[.,;，。；]+$/, "");
+}
+function isFileAttachmentUrl(value) {
+  return /^file:\/\//i.test(value);
+}
+function fileUrlToPath(value) {
+  if (!isFileAttachmentUrl(value)) return value;
+  try {
+    const parsed = new URL(value);
+    return decodeURIComponent(parsed.pathname.replace(/^\/([a-zA-Z]:[\\/])/, "$1"));
+  } catch {
+    return value.replace(/^file:\/\//i, "");
+  }
+}
+function pathToFileUrl(path) {
+  if (isFileAttachmentUrl(path)) return path;
+  const normalized = path.replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\//.test(normalized)) return `file:///${encodeURI(normalized)}`;
+  return `file://${encodeURI(normalized)}`;
 }
 function extractDate(raw, key, icons) {
   const kvRe = new RegExp(`\\b${escapeReg(key)}::?\\s*(?:\\[\\[\\s*)?(${DATE_TIME_REGEX_FRAGMENT})(?:\\s*\\]\\])?`, "i");

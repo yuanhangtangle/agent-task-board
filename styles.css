@@ -508,6 +508,10 @@
   border-color: var(--interactive-accent);
 }
 
+.atb-link-btn.is-file {
+  border-color: color-mix(in oklab, #06b6d4 45%, var(--background-modifier-border));
+}
+
 .atb-detail-empty {
   color: var(--text-faint);
   font-size: 11px;
@@ -560,6 +564,33 @@
 
 .atb-create-modal textarea {
   width: 100%;
+}
+
+.atb-file-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+  padding-left: var(--size-4-2);
+}
+
+.atb-file-picker button {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.atb-file-picker button:hover {
+  border-color: var(--interactive-accent);
+}
+
+.atb-file-picker span {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .atb-modal-buttons {

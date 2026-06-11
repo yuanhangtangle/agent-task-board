@@ -83,6 +83,7 @@ interface DragPayload {
 interface TaskLink {
   label: string;
   url: string;
+  type: "url" | "file";
 }
 
 const CATEGORY_LABELS: Record<Category, string> = {
@@ -251,6 +252,21 @@ export default class AgentTaskBoardPlugin extends Plugin {
     await this.replaceTaskBlock(task, nextBlock);
     this.refreshView();
     new Notice("已更新任务");
+  }
+
+  async appendTaskAttachments(task: TaskItem, attachmentLines: string[]) {
+    const nextAttachments = [
+      ...task.attachmentLines.map((line) => cleanupAttachmentLine(line)).filter(Boolean),
+      ...attachmentLines.map((line) => line.trim()).filter(Boolean)
+    ];
+    const nextBlock = [
+      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      ...normalizeAttachmentInput(nextAttachments.join("\n"))
+    ];
+
+    await this.replaceTaskBlock(task, nextBlock);
+    this.refreshView();
+    new Notice(`已添加 ${attachmentLines.length} 个附件`);
   }
 
   async deleteTask(task: TaskItem) {
@@ -628,6 +644,14 @@ class AgentTaskBoardView extends ItemView {
       card.removeClass("insert-after");
 
       const payload = ev.dataTransfer?.getData("application/json");
+      const hasDroppedFiles = (ev.dataTransfer?.files.length ?? 0) > 0;
+      const fileAttachments = !payload || hasDroppedFiles ? collectDroppedFileAttachments(ev.dataTransfer) : [];
+      if (fileAttachments.length > 0) {
+        await this.plugin.appendTaskAttachments(task, fileAttachments);
+        await this.renderTasks();
+        return;
+      }
+
       if (!payload) return;
 
       try {
@@ -696,7 +720,7 @@ class AgentTaskBoardView extends ItemView {
     });
     const linkIndicator = footer.createEl("button", {
       cls: `atb-link-indicator ${task.links.length === 0 ? "is-empty" : ""}`,
-      text: `链接 ${task.links.length}`
+      text: `附件 ${task.links.length}`
     });
     linkIndicator.setAttribute("title", isExpanded ? "收起附件" : "展开附件");
     linkIndicator.addEventListener("click", (event) => {
@@ -716,15 +740,15 @@ class AgentTaskBoardView extends ItemView {
     if (task.links.length > 0) {
       const links = details.createDiv({ cls: "atb-link-list" });
       for (const link of task.links) {
-        const button = links.createEl("button", { cls: "atb-link-btn", text: link.label });
+        const button = links.createEl("button", { cls: `atb-link-btn ${link.type === "file" ? "is-file" : ""}`, text: link.label });
         button.setAttribute("title", link.url);
-        button.addEventListener("click", (event) => {
+        button.addEventListener("click", async (event) => {
           event.stopPropagation();
-          window.open(link.url, "_blank");
+          await openAttachment(link);
         });
       }
     } else {
-      details.createDiv({ cls: "atb-detail-empty", text: "无附件链接" });
+      details.createDiv({ cls: "atb-detail-empty", text: "无附件" });
     }
 
     const actions = details.createDiv({ cls: "atb-detail-actions" });
@@ -935,6 +959,7 @@ class CreateTaskModal extends Modal {
       .setName("任务")
       .addTextArea((text) => {
         text.inputEl.rows = 4;
+        text.setValue(this.taskText);
         text.setPlaceholder("写下要处理的 TODO，可包含 #tag 和 @who");
         text.onChange((value) => this.taskText = value);
         window.setTimeout(() => text.inputEl.focus(), 50);
@@ -942,12 +967,18 @@ class CreateTaskModal extends Modal {
 
     new Setting(contentEl)
       .setName("附件")
-      .setDesc("每行一个链接或说明，会写成任务下方的缩进子项。")
+      .setDesc("每行一个链接、本机文件或说明，会写成任务下方的缩进子项。")
       .addTextArea((text) => {
         text.inputEl.rows = 4;
-        text.setPlaceholder("PR: https://...\n文档: https://...");
+        text.setValue(this.attachmentText);
+        text.setPlaceholder("PR: https://...\n本机文件: /Users/...");
         text.onChange((value) => this.attachmentText = value);
       });
+
+    addLocalFilePicker(contentEl, (paths) => {
+      this.attachmentText = appendAttachmentText(this.attachmentText, paths);
+      this.onOpen();
+    });
 
     new Setting(contentEl)
       .setName("分类")
@@ -958,7 +989,7 @@ class CreateTaskModal extends Modal {
           .addOption("collab", "协作任务")
           .addOption("inqueue", "入队任务")
           .addOption("pool", "任务池")
-          .setValue(this.initialCategory)
+          .setValue(this.category)
           .onChange((value: Category) => this.category = value);
       });
 
@@ -1015,12 +1046,17 @@ class EditTaskModal extends Modal {
 
     new Setting(contentEl)
       .setName("附件")
-      .setDesc("每行一个链接或说明，会写成任务下方的缩进子项。")
+      .setDesc("每行一个链接、本机文件或说明，会写成任务下方的缩进子项。")
       .addTextArea((text) => {
         text.inputEl.rows = 6;
         text.setValue(this.attachmentText);
         text.onChange((value) => this.attachmentText = value);
       });
+
+    addLocalFilePicker(contentEl, (paths) => {
+      this.attachmentText = appendAttachmentText(this.attachmentText, paths);
+      this.onOpen();
+    });
 
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "保存" });
@@ -1250,6 +1286,59 @@ function cleanupAttachmentLine(line: string) {
   return line.trim().replace(/^[-*]\s+/, "").trim();
 }
 
+function addLocalFilePicker(container: HTMLElement, onSelect: (paths: string[]) => void) {
+  const wrapper = container.createDiv({ cls: "atb-file-picker" });
+  const button = wrapper.createEl("button", { type: "button", text: "添加本机文件" });
+  const hint = wrapper.createSpan({ text: "也可以把文件拖到任务卡片上" });
+  const input = wrapper.createEl("input", { type: "file" });
+  input.multiple = true;
+  input.style.display = "none";
+
+  button.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => {
+    const paths = collectFileInputPaths(input.files);
+    if (paths.length === 0) {
+      new Notice("没有读取到本机文件路径");
+      return;
+    }
+    onSelect(paths);
+    input.value = "";
+  });
+}
+
+function collectFileInputPaths(files: FileList | null) {
+  if (!files) return [];
+  return Array.from(files)
+    .map((file) => getFilePath(file))
+    .filter((path): path is string => Boolean(path));
+}
+
+function collectDroppedFileAttachments(dataTransfer: DataTransfer | null | undefined) {
+  if (!dataTransfer) return [];
+
+  const paths = collectFileInputPaths(dataTransfer.files);
+  const uriList = dataTransfer.getData("text/uri-list")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && isFileAttachmentUrl(line));
+  const plainTextPaths = dataTransfer.getData("text/plain")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => parseLocalFilePath(line));
+
+  return Array.from(new Set([...paths, ...uriList, ...plainTextPaths]));
+}
+
+function getFilePath(file: File) {
+  const maybePath = (file as File & { path?: string }).path;
+  return typeof maybePath === "string" && maybePath.trim() ? maybePath.trim() : null;
+}
+
+function appendAttachmentText(current: string, additions: string[]) {
+  const next = additions.map((line) => line.trim()).filter(Boolean).join("\n");
+  return [current.trim(), next].filter(Boolean).join("\n");
+}
+
 async function ensureFolder(app: App, folderPath: string) {
   const parts = folderPath.split("/").filter(Boolean);
   let current = "";
@@ -1323,15 +1412,15 @@ function extractCollaborators(raw: string): string[] {
 function extractLinks(lines: string[]): TaskLink[] {
   const links: TaskLink[] = [];
   const seen = new Set<string>();
-  const markdownLinkRe = /\[([^\]]+)\]\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+)\)/g;
-  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+)/g;
+  const markdownLinkRe = /\[([^\]]+)\]((?:\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+|file:\/\/[^\s)]+)\)))/g;
+  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+|file:\/\/[^\s<>)\]]+)/g;
 
   for (const line of lines) {
     let markdownMatch: RegExpExecArray | null;
     while ((markdownMatch = markdownLinkRe.exec(line)) !== null) {
-      const url = trimUrl(markdownMatch[2]);
+      const url = trimUrl(markdownMatch[3]);
       if (!seen.has(url)) {
-        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url });
+        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
         seen.add(url);
       }
     }
@@ -1340,13 +1429,78 @@ function extractLinks(lines: string[]): TaskLink[] {
     while ((urlMatch = urlRe.exec(line)) !== null) {
       const url = trimUrl(urlMatch[1]);
       if (!seen.has(url)) {
-        links.push({ label: inferLinkLabel(line, url), url });
+        links.push({ label: inferLinkLabel(line, url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
         seen.add(url);
       }
+    }
+
+    const localFile = extractLocalFileAttachment(line);
+    if (localFile && !seen.has(localFile.url)) {
+      links.push(localFile);
+      seen.add(localFile.url);
     }
   }
 
   return links;
+}
+
+function extractLocalFileAttachment(line: string): TaskLink | null {
+  const cleaned = cleanupAttachmentLine(line);
+  const path = parseLocalFilePath(cleaned) ?? parseLocalFilePath(stripAttachmentLabel(cleaned));
+  if (!path) return null;
+  return {
+    label: inferLocalFileLabel(cleaned, path),
+    url: path,
+    type: "file"
+  };
+}
+
+function parseLocalFilePath(value: string) {
+  const cleaned = trimUrl(value.trim());
+  if (isFileAttachmentUrl(cleaned)) return cleaned;
+  if (/^(\/|~\/)/.test(cleaned)) return cleaned;
+  if (/^[a-zA-Z]:[\\/]/.test(cleaned)) return cleaned;
+  if (/^\\\\[^\\]+\\[^\\]+/.test(cleaned)) return cleaned;
+  return null;
+}
+
+function stripAttachmentLabel(value: string) {
+  if (/^[a-zA-Z]:[\\/]/.test(value)) return value;
+  return value.replace(/^[^:：]{1,40}[:：]\s*/, "");
+}
+
+function inferLocalFileLabel(line: string, path: string) {
+  const beforePath = line.includes(path) ? line.slice(0, line.indexOf(path)) : "";
+  const cleaned = cleanupAttachmentLine(beforePath).replace(/[:：-]\s*$/, "").trim();
+  return cleaned || linkFallbackLabel(path);
+}
+
+async function openAttachment(link: TaskLink) {
+  if (link.type !== "file") {
+    window.open(link.url, "_blank");
+    return;
+  }
+
+  const shell = getElectronShell();
+  if (shell) {
+    const target = fileUrlToPath(link.url);
+    const error = await shell.openPath(target);
+    if (error) new Notice(`无法打开附件：${error}`);
+    return;
+  }
+
+  window.open(isFileAttachmentUrl(link.url) ? link.url : pathToFileUrl(link.url), "_blank");
+}
+
+function getElectronShell(): { openPath: (path: string) => Promise<string> } | null {
+  const req = (window as Window & { require?: (id: string) => unknown }).require;
+  if (!req) return null;
+  try {
+    const electron = req("electron") as { shell?: { openPath: (path: string) => Promise<string> } };
+    return electron.shell ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function inferLinkLabel(line: string, url: string) {
@@ -1359,6 +1513,10 @@ function inferLinkLabel(line: string, url: string) {
 }
 
 function linkFallbackLabel(url: string) {
+  if (isFileAttachmentUrl(url) || parseLocalFilePath(url)) {
+    const path = fileUrlToPath(url);
+    return path.split(/[\\/]/).filter(Boolean).pop() || path.slice(0, 60);
+  }
   try {
     const parsed = new URL(url);
     return parsed.hostname || url.slice(0, 60);
@@ -1369,6 +1527,27 @@ function linkFallbackLabel(url: string) {
 
 function trimUrl(url: string) {
   return url.replace(/[.,;，。；]+$/, "");
+}
+
+function isFileAttachmentUrl(value: string) {
+  return /^file:\/\//i.test(value);
+}
+
+function fileUrlToPath(value: string) {
+  if (!isFileAttachmentUrl(value)) return value;
+  try {
+    const parsed = new URL(value);
+    return decodeURIComponent(parsed.pathname.replace(/^\/([a-zA-Z]:[\\/])/, "$1"));
+  } catch {
+    return value.replace(/^file:\/\//i, "");
+  }
+}
+
+function pathToFileUrl(path: string) {
+  if (isFileAttachmentUrl(path)) return path;
+  const normalized = path.replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\//.test(normalized)) return `file:///${encodeURI(normalized)}`;
+  return `file://${encodeURI(normalized)}`;
 }
 
 function extractDate(raw: string, key: string, icons: string[]): Date | null {
