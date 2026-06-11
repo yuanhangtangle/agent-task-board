@@ -658,13 +658,6 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       event.stopPropagation();
       new EditTaskModal(this.app, this.plugin, task).open();
     });
-    const deleteButton = actions.createEl("button", { cls: "atb-danger-btn", text: "\u5220\u9664" });
-    deleteButton.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await this.plugin.deleteTask(task);
-      this.expandedTaskIds.delete(task.id);
-      await this.renderTasks();
-    });
   }
   async openTaskSource(task) {
     const leaf = this.app.workspace.getLeaf(true);

@@ -783,13 +783,6 @@ class AgentTaskBoardView extends ItemView {
       new EditTaskModal(this.app, this.plugin, task).open();
     });
 
-    const deleteButton = actions.createEl("button", { cls: "atb-danger-btn", text: "删除" });
-    deleteButton.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await this.plugin.deleteTask(task);
-      this.expandedTaskIds.delete(task.id);
-      await this.renderTasks();
-    });
   }
 
   private async openTaskSource(task: TaskItem) {
