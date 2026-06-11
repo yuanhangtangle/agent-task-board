@@ -48,8 +48,10 @@ var CATEGORY_LABELS = {
   agent: "Agent \u4EFB\u52A1",
   collab: "\u534F\u4F5C\u4EFB\u52A1",
   inqueue: "\u5165\u961F\u4EFB\u52A1",
-  pool: "\u4EFB\u52A1\u6C60"
+  pool: "\u4EFB\u52A1\u6C60",
+  completed: "\u5DF2\u5B8C\u6210"
 };
+var ACTIVE_CATEGORIES = ["foreground", "agent", "collab", "inqueue", "pool"];
 var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
   async onload() {
     await this.loadSettings();
@@ -149,6 +151,53 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     }
     return tasks;
   }
+  async collectCompletedTasks() {
+    const completedPath = normalizePath(this.settings.completedTaskFile);
+    if (!completedPath) return [];
+    const file = this.app.vault.getAbstractFileByPath(completedPath);
+    if (!(file instanceof import_obsidian.TFile)) return [];
+    const tasks = [];
+    const categoryTags = this.getCategoryTags();
+    const content = await this.app.vault.cachedRead(file);
+    const lines = content.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const match = /^(\s*[-*]\s+\[[xX]\]\s+)(.*)$/.exec(line);
+      if (!match) continue;
+      const raw = match[2];
+      const blockRange = getTaskBlockRange(lines, i);
+      const originalBlock = lines.slice(i, blockRange.end + 1);
+      const attachmentLines = originalBlock.slice(1);
+      const tags = extractTags(raw);
+      const collaborators = extractCollaborators(raw);
+      const completed = extractCompletedDate(raw);
+      const created = extractDate(raw, "created", ["\u{1F4CB}"]);
+      const start = extractDate(raw, "start", ["\u{1F6EB}", "\u23F3"]);
+      const due = extractDate(raw, "due", ["\u{1F4C5}"]);
+      const text = cleanupTaskText(stripCompletionMetadata(raw));
+      if (!text) continue;
+      tasks.push({
+        id: buildTaskId(file.path, i, raw, categoryTags),
+        text,
+        rawText: raw,
+        file,
+        line: i,
+        blockEndLine: blockRange.end,
+        category: "completed",
+        tags,
+        collaborators,
+        links: extractLinks([raw, ...attachmentLines]),
+        attachmentLines,
+        created: created ?? void 0,
+        start: start ?? void 0,
+        due: due ?? void 0,
+        completed: completed ?? void 0,
+        originalLine: line,
+        originalBlock
+      });
+    }
+    return tasks;
+  }
   async createTask(text, category, targetFilePath, attachmentText = "") {
     const cleaned = text.trim();
     if (!cleaned) return;
@@ -174,7 +223,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       return;
     }
     const nextBlock = [
-      buildTaskLine(nextRaw, task.category, categoryTags),
+      buildTaskHeaderLine(task, nextRaw, categoryTags),
       ...attachmentText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => `  - ${line.replace(/^[-*]\s+/, "")}`)
     ];
     await this.replaceTaskBlock(task, nextBlock);
@@ -187,7 +236,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       ...attachmentLines.map((line) => line.trim()).filter(Boolean)
     ];
     const nextBlock = [
-      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
     await this.replaceTaskBlock(task, nextBlock);
@@ -201,7 +250,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       return;
     }
     const nextBlock = [
-      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
     await this.replaceTaskBlock(task, nextBlock);
@@ -249,11 +298,20 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     const categoryTags = this.getCategoryTags();
     const rewriteBlock = (block) => {
       const next = [...block];
-      next[0] = setCategoryTag(next[0], category, categoryTags);
+      next[0] = setCategoryTag(restoreIncompleteTaskLine(next[0]), category, categoryTags);
       return next;
     };
     if (targetTask && task.id === targetTask.id) return;
     if (!targetTask) {
+      if (task.category === "completed") {
+        const nextBlock = rewriteBlock(task.originalBlock);
+        const inboxFile = await this.ensureMarkdownFile(normalizePath(this.settings.inboxFile));
+        await this.removeTaskBlock(task);
+        await this.app.vault.process(inboxFile, (data) => appendBlock(data, nextBlock));
+        this.refreshView();
+        new import_obsidian.Notice(`\u5DF2\u6062\u590D\u5230${CATEGORY_LABELS[category]}`);
+        return;
+      }
       await this.replaceTaskBlock(task, rewriteBlock(task.originalBlock));
       this.refreshView();
       new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${CATEGORY_LABELS[category]}`);
@@ -314,13 +372,14 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
   syncTaskOrder(tasks) {
     const presentIds = new Set(tasks.map((task) => task.id));
     let changed = false;
-    for (const category of Object.keys(CATEGORY_LABELS)) {
+    for (const category of ACTIVE_CATEGORIES) {
       const before = this.settings.taskOrder[category] ?? [];
       const after = before.filter((id) => presentIds.has(id));
       if (after.length !== before.length) changed = true;
       this.settings.taskOrder[category] = after;
     }
     for (const task of tasks) {
+      if (!isActiveCategory(task.category)) continue;
       const order = this.settings.taskOrder[task.category];
       if (!order.includes(task.id)) {
         order.push(task.id);
@@ -330,7 +389,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     if (changed) void this.saveData(this.settings);
   }
   setOrderPosition(taskId, category, targetId, position) {
-    for (const key of Object.keys(CATEGORY_LABELS)) {
+    for (const key of ACTIVE_CATEGORIES) {
       removeValue(this.settings.taskOrder[key], taskId);
     }
     const order = this.settings.taskOrder[category];
@@ -398,6 +457,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     this.filterCollabs = [];
     this.excludeCollabs = [];
     this.filterMode = "OR";
+    this.completedFilter = "7d";
     this.expandedTaskIds = /* @__PURE__ */ new Set();
     this.plugin = plugin;
   }
@@ -422,26 +482,31 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const outer = root.createDiv({ cls: "atb-outer" });
     this.renderTopbar(outer);
     let tasks = await this.plugin.collectTasks();
+    let completedTasks = await this.plugin.collectCompletedTasks();
     tasks.sort(compareTasks);
-    this.renderFilterToolbar(outer, tasks);
+    completedTasks.sort(compareTasks);
+    this.renderFilterToolbar(outer, [...tasks, ...completedTasks]);
     tasks = this.applyFilters(tasks);
+    completedTasks = this.applyCompletedFilter(this.applyFilters(completedTasks));
     const grid = outer.createDiv({ cls: "atb-board" });
     const panels = {
       foreground: this.createPanel(grid, "\u524D\u53F0\u4EFB\u52A1", "atb-q-foreground", "foreground"),
       agent: this.createPanel(grid, "Agent \u4EFB\u52A1", "atb-q-agent", "agent"),
       collab: this.createPanel(grid, "\u534F\u4F5C\u4EFB\u52A1", "atb-q-collab", "collab"),
       inqueue: this.createPanel(grid, "\u5165\u961F\u4EFB\u52A1", "atb-q-inqueue", "inqueue"),
-      pool: this.createPanel(grid, "\u4EFB\u52A1\u6C60", "atb-q-pool", "pool")
+      pool: this.createPanel(grid, "\u4EFB\u52A1\u6C60", "atb-q-pool", "pool"),
+      completed: this.createPanel(grid, "\u5DF2\u5B8C\u6210", "atb-q-completed")
     };
-    const counters = { foreground: 0, agent: 0, collab: 0, inqueue: 0, pool: 0 };
-    const tasksByCategory = { foreground: [], agent: [], collab: [], inqueue: [], pool: [] };
-    for (const task of tasks) {
+    const counters = { foreground: 0, agent: 0, collab: 0, inqueue: 0, pool: 0, completed: 0 };
+    const tasksByCategory = { foreground: [], agent: [], collab: [], inqueue: [], pool: [], completed: [] };
+    for (const task of [...tasks, ...completedTasks]) {
       counters[task.category]++;
       tasksByCategory[task.category].push(task);
       panels[task.category].list.appendChild(this.renderTaskCard(task));
     }
     Object.keys(panels).forEach((category) => panels[category].countEl.setText(String(counters[category])));
-    for (const [category, panel] of Object.entries(panels)) {
+    for (const category of ["foreground", "agent", "collab", "inqueue", "pool"]) {
+      const panel = panels[category];
       panel.list.addEventListener("dragover", (ev) => {
         if (ev.target.closest(".atb-card")) return;
         ev.preventDefault();
@@ -498,9 +563,11 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const header = panel.createDiv({ cls: "atb-panel-header" });
     header.createDiv({ cls: "atb-panel-title", text: title });
     const actions = header.createDiv({ cls: "atb-panel-actions" });
-    const addButton = actions.createEl("button", { cls: "atb-panel-add", text: "+" });
-    addButton.setAttribute("title", `\u65B0\u589E${title}`);
-    addButton.addEventListener("click", () => new CreateTaskModal(this.app, this.plugin, category).open());
+    if (category) {
+      const addButton = actions.createEl("button", { cls: "atb-panel-add", text: "+" });
+      addButton.setAttribute("title", `\u65B0\u589E${title}`);
+      addButton.addEventListener("click", () => new CreateTaskModal(this.app, this.plugin, category).open());
+    }
     const countEl = actions.createDiv({ cls: "atb-count" });
     const list = panel.createDiv({ cls: "atb-list" });
     return { el: panel, list, countEl };
@@ -510,10 +577,11 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       task.file.path,
       `\u884C ${task.line + 1}`,
       task.due ? `\u622A\u6B62 ${(0, import_obsidian.moment)(task.due).format(this.plugin.settings.dateFormat)}` : "",
+      task.completed ? `\u5B8C\u6210 ${(0, import_obsidian.moment)(task.completed).format(this.plugin.settings.dateFormat)}` : "",
       task.created ? `\u521B\u5EFA ${(0, import_obsidian.moment)(task.created).format(this.plugin.settings.dateFormat)}` : ""
     ].filter(Boolean);
     const isExpanded = this.expandedTaskIds.has(task.id);
-    const card = createDiv({ cls: `atb-card ${isExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" \xB7 ") } });
+    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" \xB7 ") } });
     card.addEventListener("dragstart", (ev) => {
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
@@ -558,6 +626,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       try {
         const data = JSON.parse(payload);
         if (data.id === task.id) return;
+        if (!isActiveCategory(task.category)) return;
         const file = this.plugin.app.vault.getAbstractFileByPath(data.filePath);
         if (!(file instanceof import_obsidian.TFile)) return;
         await this.plugin.moveTaskLine({
@@ -584,8 +653,11 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const top = card.createDiv({ cls: "atb-card-top" });
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
+    checkbox.checked = task.category === "completed";
+    checkbox.disabled = task.category === "completed";
     checkbox.addEventListener("click", (event) => event.stopPropagation());
     checkbox.addEventListener("change", async () => {
+      if (task.category === "completed") return;
       await this.plugin.completeTask(task);
       await this.renderTasks();
     });
@@ -607,6 +679,9 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       const diff = due.diff(today, "days");
       const chip = createChip(diff < 0 ? `\u903E\u671F${Math.abs(diff)}\u5929` : diff === 0 ? "\u4ECA\u5929\u5230\u671F" : `${diff}\u5929\u540E\u5230\u671F`, diff <= 0 ? "atb-chip-danger" : "atb-chip-date");
       chips.appendChild(chip);
+    }
+    if (task.completed) {
+      chips.appendChild(createChip(`\u5B8C\u6210 ${(0, import_obsidian.moment)(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
     }
     const footer = card.createDiv({ cls: "atb-card-footer" });
     const source = footer.createDiv({ cls: "atb-source", text: `${task.file.basename}:${task.line + 1}` });
@@ -694,6 +769,16 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
         void this.renderTasks();
       });
     }
+    const completedSelect = toolbar.createEl("select", { cls: "atb-completed-filter" });
+    completedSelect.createEl("option", { value: "today", text: "\u5B8C\u6210\uFF1A\u4ECA\u5929" });
+    completedSelect.createEl("option", { value: "7d", text: "\u5B8C\u6210\uFF1A7\u5929" });
+    completedSelect.createEl("option", { value: "30d", text: "\u5B8C\u6210\uFF1A30\u5929" });
+    completedSelect.createEl("option", { value: "all", text: "\u5B8C\u6210\uFF1A\u5168\u90E8" });
+    completedSelect.value = this.completedFilter;
+    completedSelect.addEventListener("change", () => {
+      this.completedFilter = completedSelect.value;
+      void this.renderTasks();
+    });
     this.renderFilterInput(toolbar, tags, collaborators);
   }
   renderFilterChip(container, name, prefix, isExclude, includeList, excludeList, type) {
@@ -789,6 +874,17 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       const tagPass = this.filterTags.length === 0 ? true : this.filterMode === "AND" ? this.filterTags.every((tag) => task.tags.includes(tag)) : this.filterTags.some((tag) => task.tags.includes(tag));
       const collabPass = this.filterCollabs.length === 0 ? true : this.filterCollabs.some((collab) => task.collaborators.includes(collab));
       return tagPass && collabPass;
+    });
+  }
+  applyCompletedFilter(tasks) {
+    if (this.completedFilter === "all") return tasks;
+    const now = (0, import_obsidian.moment)().startOf("day");
+    return tasks.filter((task) => {
+      if (!task.completed) return this.completedFilter === "all";
+      const completed = (0, import_obsidian.moment)(task.completed).startOf("day");
+      if (this.completedFilter === "today") return completed.isSame(now, "day");
+      const days = this.completedFilter === "7d" ? 7 : 30;
+      return !completed.isBefore(now.clone().subtract(days - 1, "days"), "day");
     });
   }
 };
@@ -979,6 +1075,19 @@ function buildTaskLine(text, category, tags) {
   line = setCategoryTag(`- [ ] ${line}`, category, tags);
   return line;
 }
+function buildTaskHeaderLine(task, rawText, tags) {
+  if (task.category === "completed") {
+    const prefix = /^(\s*[-*]\s+\[[xX]\]\s+)/.exec(task.originalLine)?.[1] ?? "- [x] ";
+    return `${prefix}${rawText.trim()}`;
+  }
+  return buildTaskLine(rawText, task.category, tags);
+}
+function restoreIncompleteTaskLine(line) {
+  return stripCompletionMetadata(line).replace(/^(\s*[-*]\s+\[)[xX](\]\s+)/, "$1 $2").trimEnd();
+}
+function stripCompletionMetadata(raw) {
+  return raw.replace(/\s*✅\s*\d{4}-\d{2}-\d{2}/g, "").replace(/\s*<!--\s*from:\s*.*?-->/g, "").trim();
+}
 function findCurrentTaskLine(lines, task) {
   if (lines[task.line] === task.originalLine) return task.line;
   const start = Math.max(0, task.line - 5);
@@ -1115,6 +1224,9 @@ function normalizeTaskOrder(order) {
     inqueue: Array.isArray(order?.inqueue) ? order.inqueue : [],
     pool: Array.isArray(order?.pool) ? order.pool : []
   };
+}
+function isActiveCategory(category) {
+  return category !== "completed";
 }
 function buildTaskId(filePath, line, raw, categoryTags) {
   const stableRaw = removeCategoryTags(raw, categoryTags).replace(/\s{2,}/g, " ").trim();
@@ -1275,6 +1387,11 @@ function extractDate(raw, key, icons) {
     if (iconMatch) return parseDateString(iconMatch[1]);
   }
   return null;
+}
+function extractCompletedDate(raw) {
+  const doneMatch = /✅\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/.exec(raw);
+  if (doneMatch) return parseDateString(doneMatch[1]);
+  return extractDate(raw, "completed", []);
 }
 function parseDateString(value) {
   const parsed = (0, import_obsidian.moment)(value.trim(), STRICT_DATE_FORMATS, true);

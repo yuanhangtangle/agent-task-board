@@ -72,10 +72,17 @@
 }
 
 .atb-filter-mode,
-.atb-clear-filter {
+.atb-clear-filter,
+.atb-completed-filter {
   font-size: 11px;
   padding: 2px 7px;
   border-radius: 6px;
+}
+
+.atb-completed-filter {
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
 }
 
 .atb-clear-filter {
@@ -209,6 +216,10 @@
   background: color-mix(in oklab, #f0fdf4 24%, var(--background-secondary));
 }
 
+.atb-q-completed {
+  background: color-mix(in oklab, #e5e7eb 24%, var(--background-secondary));
+}
+
 .atb-panel-header {
   display: flex;
   align-items: center;
@@ -330,6 +341,11 @@
 
 .atb-card.is-expanded {
   border-color: color-mix(in oklab, var(--interactive-accent) 40%, var(--background-modifier-border));
+}
+
+.atb-card.is-completed .atb-task-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
 }
 
 .atb-card:hover {

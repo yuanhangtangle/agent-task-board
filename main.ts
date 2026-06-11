@@ -15,7 +15,9 @@ import {
 const VIEW_TYPE_AGENT_TASK_BOARD = "agent-task-board-view";
 
 type Category = "foreground" | "agent" | "collab" | "inqueue" | "pool";
+type BoardCategory = Category | "completed";
 type FilterMode = "AND" | "OR";
+type CompletedFilter = "today" | "7d" | "30d" | "all";
 type InsertPosition = "before" | "after" | "end";
 
 interface AgentTaskBoardSettings {
@@ -59,7 +61,7 @@ interface TaskItem {
   file: TFile;
   line: number;
   blockEndLine: number;
-  category: Category;
+  category: BoardCategory;
   tags: string[];
   collaborators: string[];
   links: TaskLink[];
@@ -67,6 +69,7 @@ interface TaskItem {
   created?: Date;
   due?: Date;
   start?: Date;
+  completed?: Date;
   originalLine: string;
   originalBlock: string[];
 }
@@ -77,7 +80,7 @@ interface DragPayload {
   line: number;
   originalLine: string;
   originalBlock: string[];
-  category: Category;
+  category: BoardCategory;
 }
 
 interface TaskLink {
@@ -86,13 +89,16 @@ interface TaskLink {
   type: "url" | "file";
 }
 
-const CATEGORY_LABELS: Record<Category, string> = {
+const CATEGORY_LABELS: Record<BoardCategory, string> = {
   foreground: "前台任务",
   agent: "Agent 任务",
   collab: "协作任务",
   inqueue: "入队任务",
-  pool: "任务池"
+  pool: "任务池",
+  completed: "已完成"
 };
+
+const ACTIVE_CATEGORIES: Category[] = ["foreground", "agent", "collab", "inqueue", "pool"];
 
 export default class AgentTaskBoardPlugin extends Plugin {
   settings: AgentTaskBoardSettings;
@@ -212,6 +218,60 @@ export default class AgentTaskBoardPlugin extends Plugin {
     return tasks;
   }
 
+  async collectCompletedTasks(): Promise<TaskItem[]> {
+    const completedPath = normalizePath(this.settings.completedTaskFile);
+    if (!completedPath) return [];
+
+    const file = this.app.vault.getAbstractFileByPath(completedPath);
+    if (!(file instanceof TFile)) return [];
+
+    const tasks: TaskItem[] = [];
+    const categoryTags = this.getCategoryTags();
+    const content = await this.app.vault.cachedRead(file);
+    const lines = content.split(/\r?\n/);
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const match = /^(\s*[-*]\s+\[[xX]\]\s+)(.*)$/.exec(line);
+      if (!match) continue;
+
+      const raw = match[2];
+      const blockRange = getTaskBlockRange(lines, i);
+      const originalBlock = lines.slice(i, blockRange.end + 1);
+      const attachmentLines = originalBlock.slice(1);
+      const tags = extractTags(raw);
+      const collaborators = extractCollaborators(raw);
+      const completed = extractCompletedDate(raw);
+      const created = extractDate(raw, "created", ["📋"]);
+      const start = extractDate(raw, "start", ["🛫", "⏳"]);
+      const due = extractDate(raw, "due", ["📅"]);
+      const text = cleanupTaskText(stripCompletionMetadata(raw));
+
+      if (!text) continue;
+      tasks.push({
+        id: buildTaskId(file.path, i, raw, categoryTags),
+        text,
+        rawText: raw,
+        file,
+        line: i,
+        blockEndLine: blockRange.end,
+        category: "completed",
+        tags,
+        collaborators,
+        links: extractLinks([raw, ...attachmentLines]),
+        attachmentLines,
+        created: created ?? undefined,
+        start: start ?? undefined,
+        due: due ?? undefined,
+        completed: completed ?? undefined,
+        originalLine: line,
+        originalBlock
+      });
+    }
+
+    return tasks;
+  }
+
   async createTask(text: string, category: Category, targetFilePath?: string, attachmentText = "") {
     const cleaned = text.trim();
     if (!cleaned) return;
@@ -241,7 +301,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     }
 
     const nextBlock = [
-      buildTaskLine(nextRaw, task.category, categoryTags),
+      buildTaskHeaderLine(task, nextRaw, categoryTags),
       ...attachmentText
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -260,7 +320,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
       ...attachmentLines.map((line) => line.trim()).filter(Boolean)
     ];
     const nextBlock = [
-      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
 
@@ -277,7 +337,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     }
 
     const nextBlock = [
-      buildTaskLine(task.rawText, task.category, this.getCategoryTags()),
+      buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
 
@@ -332,13 +392,22 @@ export default class AgentTaskBoardPlugin extends Plugin {
     const categoryTags = this.getCategoryTags();
     const rewriteBlock = (block: string[]) => {
       const next = [...block];
-      next[0] = setCategoryTag(next[0], category, categoryTags);
+      next[0] = setCategoryTag(restoreIncompleteTaskLine(next[0]), category, categoryTags);
       return next;
     };
 
     if (targetTask && task.id === targetTask.id) return;
 
     if (!targetTask) {
+      if (task.category === "completed") {
+        const nextBlock = rewriteBlock(task.originalBlock);
+        const inboxFile = await this.ensureMarkdownFile(normalizePath(this.settings.inboxFile));
+        await this.removeTaskBlock(task);
+        await this.app.vault.process(inboxFile, (data) => appendBlock(data, nextBlock));
+        this.refreshView();
+        new Notice(`已恢复到${CATEGORY_LABELS[category]}`);
+        return;
+      }
       await this.replaceTaskBlock(task, rewriteBlock(task.originalBlock));
       this.refreshView();
       new Notice(`已移动到${CATEGORY_LABELS[category]}`);
@@ -407,7 +476,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     const presentIds = new Set(tasks.map((task) => task.id));
     let changed = false;
 
-    for (const category of Object.keys(CATEGORY_LABELS) as Category[]) {
+    for (const category of ACTIVE_CATEGORIES) {
       const before = this.settings.taskOrder[category] ?? [];
       const after = before.filter((id) => presentIds.has(id));
       if (after.length !== before.length) changed = true;
@@ -415,6 +484,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     }
 
     for (const task of tasks) {
+      if (!isActiveCategory(task.category)) continue;
       const order = this.settings.taskOrder[task.category];
       if (!order.includes(task.id)) {
         order.push(task.id);
@@ -426,7 +496,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
   }
 
   private setOrderPosition(taskId: string, category: Category, targetId: string | null, position: InsertPosition) {
-    for (const key of Object.keys(CATEGORY_LABELS) as Category[]) {
+    for (const key of ACTIVE_CATEGORIES) {
       removeValue(this.settings.taskOrder[key], taskId);
     }
 
@@ -501,6 +571,7 @@ class AgentTaskBoardView extends ItemView {
   private filterCollabs: string[] = [];
   private excludeCollabs: string[] = [];
   private filterMode: FilterMode = "OR";
+  private completedFilter: CompletedFilter = "7d";
   private expandedTaskIds = new Set<string>();
 
   constructor(leaf: WorkspaceLeaf, plugin: AgentTaskBoardPlugin) {
@@ -524,30 +595,35 @@ class AgentTaskBoardView extends ItemView {
     this.renderTopbar(outer);
 
     let tasks = await this.plugin.collectTasks();
+    let completedTasks = await this.plugin.collectCompletedTasks();
     tasks.sort(compareTasks);
+    completedTasks.sort(compareTasks);
 
-    this.renderFilterToolbar(outer, tasks);
+    this.renderFilterToolbar(outer, [...tasks, ...completedTasks]);
     tasks = this.applyFilters(tasks);
+    completedTasks = this.applyCompletedFilter(this.applyFilters(completedTasks));
 
     const grid = outer.createDiv({ cls: "atb-board" });
-    const panels: Record<Category, { el: HTMLElement; list: HTMLElement; countEl: HTMLElement }> = {
+    const panels: Record<BoardCategory, { el: HTMLElement; list: HTMLElement; countEl: HTMLElement }> = {
       foreground: this.createPanel(grid, "前台任务", "atb-q-foreground", "foreground"),
       agent: this.createPanel(grid, "Agent 任务", "atb-q-agent", "agent"),
       collab: this.createPanel(grid, "协作任务", "atb-q-collab", "collab"),
       inqueue: this.createPanel(grid, "入队任务", "atb-q-inqueue", "inqueue"),
-      pool: this.createPanel(grid, "任务池", "atb-q-pool", "pool")
+      pool: this.createPanel(grid, "任务池", "atb-q-pool", "pool"),
+      completed: this.createPanel(grid, "已完成", "atb-q-completed")
     };
 
-    const counters: Record<Category, number> = { foreground: 0, agent: 0, collab: 0, inqueue: 0, pool: 0 };
-    const tasksByCategory: Record<Category, TaskItem[]> = { foreground: [], agent: [], collab: [], inqueue: [], pool: [] };
-    for (const task of tasks) {
+    const counters: Record<BoardCategory, number> = { foreground: 0, agent: 0, collab: 0, inqueue: 0, pool: 0, completed: 0 };
+    const tasksByCategory: Record<BoardCategory, TaskItem[]> = { foreground: [], agent: [], collab: [], inqueue: [], pool: [], completed: [] };
+    for (const task of [...tasks, ...completedTasks]) {
       counters[task.category]++;
       tasksByCategory[task.category].push(task);
       panels[task.category].list.appendChild(this.renderTaskCard(task));
     }
-    (Object.keys(panels) as Category[]).forEach((category) => panels[category].countEl.setText(String(counters[category])));
+    (Object.keys(panels) as BoardCategory[]).forEach((category) => panels[category].countEl.setText(String(counters[category])));
 
-    for (const [category, panel] of Object.entries(panels) as [Category, { el: HTMLElement; list: HTMLElement }][]) {
+    for (const category of ["foreground", "agent", "collab", "inqueue", "pool"] as Category[]) {
+      const panel = panels[category];
       panel.list.addEventListener("dragover", (ev: DragEvent) => {
         if ((ev.target as HTMLElement).closest(".atb-card")) return;
         ev.preventDefault();
@@ -604,14 +680,16 @@ class AgentTaskBoardView extends ItemView {
     refreshButton.addEventListener("click", () => this.renderTasks());
   }
 
-  private createPanel(container: HTMLElement, title: string, cls: string, category: Category) {
+  private createPanel(container: HTMLElement, title: string, cls: string, category?: Category) {
     const panel = container.createDiv({ cls: `atb-panel ${cls}` });
     const header = panel.createDiv({ cls: "atb-panel-header" });
     header.createDiv({ cls: "atb-panel-title", text: title });
     const actions = header.createDiv({ cls: "atb-panel-actions" });
-    const addButton = actions.createEl("button", { cls: "atb-panel-add", text: "+" });
-    addButton.setAttribute("title", `新增${title}`);
-    addButton.addEventListener("click", () => new CreateTaskModal(this.app, this.plugin, category).open());
+    if (category) {
+      const addButton = actions.createEl("button", { cls: "atb-panel-add", text: "+" });
+      addButton.setAttribute("title", `新增${title}`);
+      addButton.addEventListener("click", () => new CreateTaskModal(this.app, this.plugin, category).open());
+    }
     const countEl = actions.createDiv({ cls: "atb-count" });
     const list = panel.createDiv({ cls: "atb-list" });
     return { el: panel, list, countEl };
@@ -622,11 +700,12 @@ class AgentTaskBoardView extends ItemView {
       task.file.path,
       `行 ${task.line + 1}`,
       task.due ? `截止 ${moment(task.due).format(this.plugin.settings.dateFormat)}` : "",
+      task.completed ? `完成 ${moment(task.completed).format(this.plugin.settings.dateFormat)}` : "",
       task.created ? `创建 ${moment(task.created).format(this.plugin.settings.dateFormat)}` : ""
     ].filter(Boolean);
 
     const isExpanded = this.expandedTaskIds.has(task.id);
-    const card = createDiv({ cls: `atb-card ${isExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" · ") } });
+    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" · ") } });
     card.addEventListener("dragstart", (ev: DragEvent) => {
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
@@ -674,6 +753,7 @@ class AgentTaskBoardView extends ItemView {
       try {
         const data = JSON.parse(payload) as DragPayload;
         if (data.id === task.id) return;
+        if (!isActiveCategory(task.category)) return;
         const file = this.plugin.app.vault.getAbstractFileByPath(data.filePath);
         if (!(file instanceof TFile)) return;
         await this.plugin.moveTaskLine({
@@ -701,8 +781,11 @@ class AgentTaskBoardView extends ItemView {
     const top = card.createDiv({ cls: "atb-card-top" });
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
+    checkbox.checked = task.category === "completed";
+    checkbox.disabled = task.category === "completed";
     checkbox.addEventListener("click", (event) => event.stopPropagation());
     checkbox.addEventListener("change", async () => {
+      if (task.category === "completed") return;
       await this.plugin.completeTask(task);
       await this.renderTasks();
     });
@@ -726,6 +809,9 @@ class AgentTaskBoardView extends ItemView {
       const diff = due.diff(today, "days");
       const chip = createChip(diff < 0 ? `逾期${Math.abs(diff)}天` : diff === 0 ? "今天到期" : `${diff}天后到期`, diff <= 0 ? "atb-chip-danger" : "atb-chip-date");
       chips.appendChild(chip);
+    }
+    if (task.completed) {
+      chips.appendChild(createChip(`完成 ${moment(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
     }
 
     const footer = card.createDiv({ cls: "atb-card-footer" });
@@ -825,6 +911,17 @@ class AgentTaskBoardView extends ItemView {
         void this.renderTasks();
       });
     }
+
+    const completedSelect = toolbar.createEl("select", { cls: "atb-completed-filter" });
+    completedSelect.createEl("option", { value: "today", text: "完成：今天" });
+    completedSelect.createEl("option", { value: "7d", text: "完成：7天" });
+    completedSelect.createEl("option", { value: "30d", text: "完成：30天" });
+    completedSelect.createEl("option", { value: "all", text: "完成：全部" });
+    completedSelect.value = this.completedFilter;
+    completedSelect.addEventListener("change", () => {
+      this.completedFilter = completedSelect.value as CompletedFilter;
+      void this.renderTasks();
+    });
 
     this.renderFilterInput(toolbar, tags, collaborators);
   }
@@ -947,6 +1044,19 @@ class AgentTaskBoardView extends ItemView {
         : this.filterCollabs.some((collab) => task.collaborators.includes(collab));
 
       return tagPass && collabPass;
+    });
+  }
+
+  private applyCompletedFilter(tasks: TaskItem[]) {
+    if (this.completedFilter === "all") return tasks;
+
+    const now = moment().startOf("day");
+    return tasks.filter((task) => {
+      if (!task.completed) return this.completedFilter === "all";
+      const completed = moment(task.completed).startOf("day");
+      if (this.completedFilter === "today") return completed.isSame(now, "day");
+      const days = this.completedFilter === "7d" ? 7 : 30;
+      return !completed.isBefore(now.clone().subtract(days - 1, "days"), "day");
     });
   }
 }
@@ -1249,6 +1359,27 @@ function buildTaskLine(text: string, category: Category, tags: Record<Exclude<Ca
   return line;
 }
 
+function buildTaskHeaderLine(task: TaskItem, rawText: string, tags: Record<Exclude<Category, "pool">, string>) {
+  if (task.category === "completed") {
+    const prefix = /^(\s*[-*]\s+\[[xX]\]\s+)/.exec(task.originalLine)?.[1] ?? "- [x] ";
+    return `${prefix}${rawText.trim()}`;
+  }
+  return buildTaskLine(rawText, task.category, tags);
+}
+
+function restoreIncompleteTaskLine(line: string) {
+  return stripCompletionMetadata(line)
+    .replace(/^(\s*[-*]\s+\[)[xX](\]\s+)/, "$1 $2")
+    .trimEnd();
+}
+
+function stripCompletionMetadata(raw: string) {
+  return raw
+    .replace(/\s*✅\s*\d{4}-\d{2}-\d{2}/g, "")
+    .replace(/\s*<!--\s*from:\s*.*?-->/g, "")
+    .trim();
+}
+
 function findCurrentTaskLine(lines: string[], task: TaskItem) {
   if (lines[task.line] === task.originalLine) return task.line;
   const start = Math.max(0, task.line - 5);
@@ -1422,6 +1553,10 @@ function normalizeTaskOrder(order: Partial<Record<Category, string[]>> | undefin
     inqueue: Array.isArray(order?.inqueue) ? order.inqueue : [],
     pool: Array.isArray(order?.pool) ? order.pool : []
   };
+}
+
+function isActiveCategory(category: BoardCategory): category is Category {
+  return category !== "completed";
 }
 
 function buildTaskId(filePath: string, line: number, raw: string, categoryTags: Record<Exclude<Category, "pool">, string>) {
@@ -1615,6 +1750,12 @@ function extractDate(raw: string, key: string, icons: string[]): Date | null {
     if (iconMatch) return parseDateString(iconMatch[1]);
   }
   return null;
+}
+
+function extractCompletedDate(raw: string): Date | null {
+  const doneMatch = /✅\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/.exec(raw);
+  if (doneMatch) return parseDateString(doneMatch[1]);
+  return extractDate(raw, "completed", []);
 }
 
 function parseDateString(value: string): Date | null {
