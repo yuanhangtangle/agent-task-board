@@ -1176,7 +1176,9 @@ function extractLinks(lines) {
 }
 function extractLocalFileAttachment(line) {
   const cleaned = cleanupAttachmentLine(line);
-  const path = parseLocalFilePath(cleaned) ?? parseLocalFilePath(stripAttachmentLabel(cleaned));
+  if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
+  const stripped = stripAttachmentLabel(cleaned);
+  const path = parseLocalFilePath(cleaned) ?? (stripped === cleaned ? null : parseLocalFilePath(stripped));
   if (!path) return null;
   return {
     label: inferLocalFileLabel(cleaned, path),
@@ -1186,13 +1188,15 @@ function extractLocalFileAttachment(line) {
 }
 function parseLocalFilePath(value) {
   const cleaned = trimUrl(value.trim());
+  if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
   if (isFileAttachmentUrl(cleaned)) return cleaned;
-  if (/^(\/|~\/)/.test(cleaned)) return cleaned;
+  if (/^\/(?!\/)/.test(cleaned) || /^~\//.test(cleaned)) return cleaned;
   if (/^[a-zA-Z]:[\\/]/.test(cleaned)) return cleaned;
   if (/^\\\\[^\\]+\\[^\\]+/.test(cleaned)) return cleaned;
   return null;
 }
 function stripAttachmentLabel(value) {
+  if (hasUrlScheme(value)) return value;
   if (/^[a-zA-Z]:[\\/]/.test(value)) return value;
   return value.replace(/^[^:：]{1,40}[:：]\s*/, "");
 }
@@ -1247,6 +1251,9 @@ function trimUrl(url) {
 }
 function isFileAttachmentUrl(value) {
   return /^file:\/\//i.test(value);
+}
+function hasUrlScheme(value) {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
 }
 function fileUrlToPath(value) {
   if (!isFileAttachmentUrl(value)) return value;

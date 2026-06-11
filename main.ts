@@ -1495,7 +1495,10 @@ function extractLinks(lines: string[]): TaskLink[] {
 
 function extractLocalFileAttachment(line: string): TaskLink | null {
   const cleaned = cleanupAttachmentLine(line);
-  const path = parseLocalFilePath(cleaned) ?? parseLocalFilePath(stripAttachmentLabel(cleaned));
+  if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
+
+  const stripped = stripAttachmentLabel(cleaned);
+  const path = parseLocalFilePath(cleaned) ?? (stripped === cleaned ? null : parseLocalFilePath(stripped));
   if (!path) return null;
   return {
     label: inferLocalFileLabel(cleaned, path),
@@ -1506,14 +1509,16 @@ function extractLocalFileAttachment(line: string): TaskLink | null {
 
 function parseLocalFilePath(value: string) {
   const cleaned = trimUrl(value.trim());
+  if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
   if (isFileAttachmentUrl(cleaned)) return cleaned;
-  if (/^(\/|~\/)/.test(cleaned)) return cleaned;
+  if (/^\/(?!\/)/.test(cleaned) || /^~\//.test(cleaned)) return cleaned;
   if (/^[a-zA-Z]:[\\/]/.test(cleaned)) return cleaned;
   if (/^\\\\[^\\]+\\[^\\]+/.test(cleaned)) return cleaned;
   return null;
 }
 
 function stripAttachmentLabel(value: string) {
+  if (hasUrlScheme(value)) return value;
   if (/^[a-zA-Z]:[\\/]/.test(value)) return value;
   return value.replace(/^[^:：]{1,40}[:：]\s*/, "");
 }
@@ -1580,6 +1585,10 @@ function trimUrl(url: string) {
 
 function isFileAttachmentUrl(value: string) {
   return /^file:\/\//i.test(value);
+}
+
+function hasUrlScheme(value: string) {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
 }
 
 function fileUrlToPath(value: string) {
