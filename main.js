@@ -198,8 +198,8 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     }
     return tasks;
   }
-  async createTask(text, category, targetFilePath, attachmentText = "") {
-    const cleaned = text.trim();
+  async createTask(text, category, targetFilePath, attachmentText = "", tagText = "") {
+    const cleaned = applyTaskTags(text, tagText).trim();
     if (!cleaned) return;
     const path = normalizePath(targetFilePath || this.settings.inboxFile);
     if (!path) {
@@ -215,9 +215,9 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     this.refreshView();
     new import_obsidian.Notice("\u5DF2\u521B\u5EFA\u4EFB\u52A1");
   }
-  async updateTask(task, rawText, attachmentText) {
+  async updateTask(task, rawText, attachmentText, tagText = "") {
     const categoryTags = this.getCategoryTags();
-    const nextRaw = rawText.trim();
+    const nextRaw = replaceTaskTags(rawText, tagText, categoryTags).trim();
     if (!nextRaw) {
       new import_obsidian.Notice("\u4EFB\u52A1\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A");
       return;
@@ -456,7 +456,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     this.excludeTags = [];
     this.filterCollabs = [];
     this.excludeCollabs = [];
-    this.filterMode = "OR";
+    this.filterMode = "AND";
     this.completedFilter = "7d";
     this.expandedTaskIds = /* @__PURE__ */ new Set();
     this.plugin = plugin;
@@ -664,12 +664,27 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const title = top.createDiv({ cls: "atb-task-title", text: task.text });
     const chips = card.createDiv({ cls: "atb-chips" });
     if (task.collaborators.length > 0) {
-      for (const collaborator of task.collaborators) chips.appendChild(createChip(`@${collaborator}`, "atb-chip-collab"));
+      for (const collaborator of task.collaborators) {
+        const chip = createChip(`@${collaborator}`, "atb-chip-collab");
+        chip.addClass("atb-clickable-chip");
+        chip.setAttribute("title", `\u7B5B\u9009 @${collaborator}`);
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.addFilterValue(this.filterCollabs, collaborator);
+        });
+        chips.appendChild(chip);
+      }
     }
     if (task.tags.length > 0) {
       for (const tag of task.tags) {
         const chip = createChip(`#${tag}`, "atb-chip-tag");
         chip.setAttribute("data-tag-color", String(getTagColorIndex(tag)));
+        chip.addClass("atb-clickable-chip");
+        chip.setAttribute("title", `\u7B5B\u9009 #${tag}`);
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.addFilterValue(this.filterTags, tag);
+        });
         chips.appendChild(chip);
       }
     }
@@ -747,14 +762,15 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const collaborators = Array.from(new Set(allTasks.flatMap((task) => task.collaborators))).sort();
     const toolbar = container.createDiv({ cls: "atb-filter-toolbar" });
     const activeFilters = this.filterTags.length + this.excludeTags.length + this.filterCollabs.length + this.excludeCollabs.length;
-    if (this.filterTags.length >= 2) {
-      const modeButton = toolbar.createEl("button", { cls: "atb-filter-mode", text: this.filterMode });
-      modeButton.setAttribute("title", this.filterMode === "AND" ? "\u6240\u6709\u6807\u7B7E\u90FD\u5339\u914D" : "\u4EFB\u4E00\u6807\u7B7E\u5339\u914D");
-      modeButton.addEventListener("click", () => {
-        this.filterMode = this.filterMode === "AND" ? "OR" : "AND";
-        void this.renderTasks();
-      });
-    }
+    const modeSelect = toolbar.createEl("select", { cls: "atb-filter-mode" });
+    modeSelect.createEl("option", { value: "AND", text: "\u8FC7\u6EE4\uFF1AAND" });
+    modeSelect.createEl("option", { value: "OR", text: "\u8FC7\u6EE4\uFF1AOR" });
+    modeSelect.value = this.filterMode;
+    modeSelect.setAttribute("title", this.filterMode === "AND" ? "\u6240\u6709\u6807\u7B7E\u90FD\u5339\u914D" : "\u4EFB\u4E00\u6807\u7B7E\u5339\u914D");
+    modeSelect.addEventListener("change", () => {
+      this.filterMode = modeSelect.value;
+      void this.renderTasks();
+    });
     for (const tag of this.filterTags) this.renderFilterChip(toolbar, tag, "#", false, this.filterTags, this.excludeTags, "tag");
     for (const tag of this.excludeTags) this.renderFilterChip(toolbar, tag, "#", true, this.filterTags, this.excludeTags, "tag");
     for (const collaborator of this.filterCollabs) this.renderFilterChip(toolbar, collaborator, "@", false, this.filterCollabs, this.excludeCollabs, "collab");
@@ -801,6 +817,10 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       removeValue(isExclude ? excludeList : includeList, name);
       void this.renderTasks();
     });
+  }
+  addFilterValue(values, value) {
+    if (!values.includes(value)) values.push(value);
+    void this.renderTasks();
   }
   renderFilterInput(container, allTags, allCollaborators) {
     const wrapper = container.createDiv({ cls: "atb-filter-input-wrap" });
@@ -892,6 +912,7 @@ var CreateTaskModal = class extends import_obsidian.Modal {
   constructor(app, plugin, initialCategory = "foreground") {
     super(app);
     this.taskText = "";
+    this.tagText = "";
     this.attachmentText = "";
     this.plugin = plugin;
     this.initialCategory = initialCategory;
@@ -909,6 +930,11 @@ var CreateTaskModal = class extends import_obsidian.Modal {
       text.setPlaceholder("\u5199\u4E0B\u8981\u5904\u7406\u7684 TODO\uFF0C\u53EF\u5305\u542B #tag \u548C @who");
       text.onChange((value) => this.taskText = value);
       window.setTimeout(() => text.inputEl.focus(), 50);
+    });
+    new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B\u5206\u7C7B\u6807\u7B7E\u7531\u8C61\u9650\u81EA\u52A8\u7EF4\u62A4\u3002").addText((text) => {
+      text.setValue(this.tagText);
+      text.setPlaceholder("#today #important");
+      text.onChange((value) => this.tagText = value);
     });
     new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u3001\u672C\u673A\u6587\u4EF6\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
       text.inputEl.rows = 4;
@@ -930,7 +956,7 @@ var CreateTaskModal = class extends import_obsidian.Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const createButton = buttons.createEl("button", { cls: "mod-cta", text: "\u521B\u5EFA" });
     createButton.addEventListener("click", async () => {
-      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.attachmentText);
+      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "\u53D6\u6D88" });
@@ -946,6 +972,7 @@ var EditTaskModal = class extends import_obsidian.Modal {
     this.plugin = plugin;
     this.task = task;
     this.rawText = task.rawText;
+    this.tagText = getEditableTaskTags(task, plugin.getCategoryTags()).map((tag) => `#${tag}`).join(" ");
     this.attachmentText = task.attachmentLines.map((line) => cleanupAttachmentLine(line)).filter(Boolean).join("\n");
   }
   onOpen() {
@@ -959,6 +986,11 @@ var EditTaskModal = class extends import_obsidian.Modal {
       text.onChange((value) => this.rawText = value);
       window.setTimeout(() => text.inputEl.focus(), 50);
     });
+    new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B\u4FDD\u5B58\u65F6\u66FF\u6362\u4EFB\u52A1\u91CC\u7684\u666E\u901A\u6807\u7B7E\u3002").addText((text) => {
+      text.setValue(this.tagText);
+      text.setPlaceholder("#today #important");
+      text.onChange((value) => this.tagText = value);
+    });
     new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u3001\u672C\u673A\u6587\u4EF6\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
       text.inputEl.rows = 6;
       text.setValue(this.attachmentText);
@@ -971,7 +1003,7 @@ var EditTaskModal = class extends import_obsidian.Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "\u4FDD\u5B58" });
     saveButton.addEventListener("click", async () => {
-      await this.plugin.updateTask(this.task, this.rawText, this.attachmentText);
+      await this.plugin.updateTask(this.task, this.rawText, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "\u53D6\u6D88" });
@@ -1248,6 +1280,33 @@ function extractTags(raw) {
   let match;
   while ((match = re.exec(raw)) !== null) tags.push(match[1]);
   return Array.from(new Set(tags));
+}
+function normalizeTagInput(value) {
+  return Array.from(new Set(value.split(/[\s,，]+/).map((tag) => tag.trim().replace(/^#/, "")).filter((tag) => /^[a-zA-Z0-9_/\-\u4e00-\u9fff]+$/.test(tag))));
+}
+function applyTaskTags(rawText, tagText) {
+  const inputTags = normalizeTagInput(tagText);
+  if (inputTags.length === 0) return rawText.trim();
+  const existingTags = extractTags(rawText);
+  const nextTags = Array.from(/* @__PURE__ */ new Set([...existingTags, ...inputTags]));
+  return appendTags(removeAllTaskTags(rawText), nextTags);
+}
+function replaceTaskTags(rawText, tagText, categoryTags) {
+  const categoryNames = new Set(Object.values(categoryTags).map((tag) => tag.replace(/^#/, "").toLowerCase()));
+  const nextTags = normalizeTagInput(tagText).filter((tag) => !categoryNames.has(tag.toLowerCase()));
+  return appendTags(removeAllTaskTags(rawText), nextTags);
+}
+function removeAllTaskTags(rawText) {
+  return rawText.replace(/#([a-zA-Z0-9_/\-\u4e00-\u9fff]+)/g, "").replace(/\s{2,}/g, " ").trim();
+}
+function appendTags(rawText, tags) {
+  const cleaned = rawText.trim();
+  const suffix = tags.map((tag) => `#${tag}`).join(" ");
+  return [cleaned, suffix].filter(Boolean).join(" ");
+}
+function getEditableTaskTags(task, categoryTags) {
+  const categoryNames = new Set(Object.values(categoryTags).map((tag) => tag.replace(/^#/, "").toLowerCase()));
+  return task.tags.filter((tag) => !categoryNames.has(tag.toLowerCase()));
 }
 function extractCollaborators(raw) {
   const collaborators = [];

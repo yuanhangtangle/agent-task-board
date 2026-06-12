@@ -409,6 +409,15 @@
   white-space: nowrap;
 }
 
+.atb-clickable-chip {
+  cursor: pointer;
+}
+
+.atb-clickable-chip:hover {
+  filter: brightness(1.04);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--interactive-accent) 35%, transparent);
+}
+
 .atb-chip-collab {
   border-color: #3b82f6;
   background: color-mix(in oklab, #eff6ff 80%, var(--background-primary));

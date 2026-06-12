@@ -272,8 +272,8 @@ export default class AgentTaskBoardPlugin extends Plugin {
     return tasks;
   }
 
-  async createTask(text: string, category: Category, targetFilePath?: string, attachmentText = "") {
-    const cleaned = text.trim();
+  async createTask(text: string, category: Category, targetFilePath?: string, attachmentText = "", tagText = "") {
+    const cleaned = applyTaskTags(text, tagText).trim();
     if (!cleaned) return;
 
     const path = normalizePath(targetFilePath || this.settings.inboxFile);
@@ -292,9 +292,9 @@ export default class AgentTaskBoardPlugin extends Plugin {
     new Notice("已创建任务");
   }
 
-  async updateTask(task: TaskItem, rawText: string, attachmentText: string) {
+  async updateTask(task: TaskItem, rawText: string, attachmentText: string, tagText = "") {
     const categoryTags = this.getCategoryTags();
-    const nextRaw = rawText.trim();
+    const nextRaw = replaceTaskTags(rawText, tagText, categoryTags).trim();
     if (!nextRaw) {
       new Notice("任务内容不能为空");
       return;
@@ -570,7 +570,7 @@ class AgentTaskBoardView extends ItemView {
   private excludeTags: string[] = [];
   private filterCollabs: string[] = [];
   private excludeCollabs: string[] = [];
-  private filterMode: FilterMode = "OR";
+  private filterMode: FilterMode = "AND";
   private completedFilter: CompletedFilter = "7d";
   private expandedTaskIds = new Set<string>();
 
@@ -794,12 +794,27 @@ class AgentTaskBoardView extends ItemView {
 
     const chips = card.createDiv({ cls: "atb-chips" });
     if (task.collaborators.length > 0) {
-      for (const collaborator of task.collaborators) chips.appendChild(createChip(`@${collaborator}`, "atb-chip-collab"));
+      for (const collaborator of task.collaborators) {
+        const chip = createChip(`@${collaborator}`, "atb-chip-collab");
+        chip.addClass("atb-clickable-chip");
+        chip.setAttribute("title", `筛选 @${collaborator}`);
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.addFilterValue(this.filterCollabs, collaborator);
+        });
+        chips.appendChild(chip);
+      }
     }
     if (task.tags.length > 0) {
       for (const tag of task.tags) {
         const chip = createChip(`#${tag}`, "atb-chip-tag");
         chip.setAttribute("data-tag-color", String(getTagColorIndex(tag)));
+        chip.addClass("atb-clickable-chip");
+        chip.setAttribute("title", `筛选 #${tag}`);
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.addFilterValue(this.filterTags, tag);
+        });
         chips.appendChild(chip);
       }
     }
@@ -887,14 +902,15 @@ class AgentTaskBoardView extends ItemView {
     const toolbar = container.createDiv({ cls: "atb-filter-toolbar" });
     const activeFilters = this.filterTags.length + this.excludeTags.length + this.filterCollabs.length + this.excludeCollabs.length;
 
-    if (this.filterTags.length >= 2) {
-      const modeButton = toolbar.createEl("button", { cls: "atb-filter-mode", text: this.filterMode });
-      modeButton.setAttribute("title", this.filterMode === "AND" ? "所有标签都匹配" : "任一标签匹配");
-      modeButton.addEventListener("click", () => {
-        this.filterMode = this.filterMode === "AND" ? "OR" : "AND";
-        void this.renderTasks();
-      });
-    }
+    const modeSelect = toolbar.createEl("select", { cls: "atb-filter-mode" });
+    modeSelect.createEl("option", { value: "AND", text: "过滤：AND" });
+    modeSelect.createEl("option", { value: "OR", text: "过滤：OR" });
+    modeSelect.value = this.filterMode;
+    modeSelect.setAttribute("title", this.filterMode === "AND" ? "所有标签都匹配" : "任一标签匹配");
+    modeSelect.addEventListener("change", () => {
+      this.filterMode = modeSelect.value as FilterMode;
+      void this.renderTasks();
+    });
 
     for (const tag of this.filterTags) this.renderFilterChip(toolbar, tag, "#", false, this.filterTags, this.excludeTags, "tag");
     for (const tag of this.excludeTags) this.renderFilterChip(toolbar, tag, "#", true, this.filterTags, this.excludeTags, "tag");
@@ -946,6 +962,11 @@ class AgentTaskBoardView extends ItemView {
       removeValue(isExclude ? excludeList : includeList, name);
       void this.renderTasks();
     });
+  }
+
+  private addFilterValue(values: string[], value: string) {
+    if (!values.includes(value)) values.push(value);
+    void this.renderTasks();
   }
 
   private renderFilterInput(container: HTMLElement, allTags: string[], allCollaborators: string[]) {
@@ -1065,6 +1086,7 @@ class CreateTaskModal extends Modal {
   plugin: AgentTaskBoardPlugin;
   initialCategory: Category;
   taskText = "";
+  tagText = "";
   attachmentText = "";
   category: Category;
   targetFile: string;
@@ -1091,6 +1113,15 @@ class CreateTaskModal extends Modal {
         text.setPlaceholder("写下要处理的 TODO，可包含 #tag 和 @who");
         text.onChange((value) => this.taskText = value);
         window.setTimeout(() => text.inputEl.focus(), 50);
+      });
+
+    new Setting(contentEl)
+      .setName("标签")
+      .setDesc("空格分隔，支持写 #tag；分类标签由象限自动维护。")
+      .addText((text) => {
+        text.setValue(this.tagText);
+        text.setPlaceholder("#today #important");
+        text.onChange((value) => this.tagText = value);
       });
 
     new Setting(contentEl)
@@ -1131,7 +1162,7 @@ class CreateTaskModal extends Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const createButton = buttons.createEl("button", { cls: "mod-cta", text: "创建" });
     createButton.addEventListener("click", async () => {
-      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.attachmentText);
+      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "取消" });
@@ -1147,6 +1178,7 @@ class EditTaskModal extends Modal {
   plugin: AgentTaskBoardPlugin;
   task: TaskItem;
   rawText: string;
+  tagText: string;
   attachmentText: string;
 
   constructor(app: App, plugin: AgentTaskBoardPlugin, task: TaskItem) {
@@ -1154,6 +1186,7 @@ class EditTaskModal extends Modal {
     this.plugin = plugin;
     this.task = task;
     this.rawText = task.rawText;
+    this.tagText = getEditableTaskTags(task, plugin.getCategoryTags()).map((tag) => `#${tag}`).join(" ");
     this.attachmentText = task.attachmentLines.map((line) => cleanupAttachmentLine(line)).filter(Boolean).join("\n");
   }
 
@@ -1173,6 +1206,15 @@ class EditTaskModal extends Modal {
       });
 
     new Setting(contentEl)
+      .setName("标签")
+      .setDesc("空格分隔，支持写 #tag；保存时替换任务里的普通标签。")
+      .addText((text) => {
+        text.setValue(this.tagText);
+        text.setPlaceholder("#today #important");
+        text.onChange((value) => this.tagText = value);
+      });
+
+    new Setting(contentEl)
       .setName("附件")
       .setDesc("每行一个链接、本机文件或说明，会写成任务下方的缩进子项。")
       .addTextArea((text) => {
@@ -1189,7 +1231,7 @@ class EditTaskModal extends Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "保存" });
     saveButton.addEventListener("click", async () => {
-      await this.plugin.updateTask(this.task, this.rawText, this.attachmentText);
+      await this.plugin.updateTask(this.task, this.rawText, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "取消" });
@@ -1584,6 +1626,46 @@ function extractTags(raw: string): string[] {
   let match: RegExpExecArray | null;
   while ((match = re.exec(raw)) !== null) tags.push(match[1]);
   return Array.from(new Set(tags));
+}
+
+function normalizeTagInput(value: string) {
+  return Array.from(new Set(value
+    .split(/[\s,，]+/)
+    .map((tag) => tag.trim().replace(/^#/, ""))
+    .filter((tag) => /^[a-zA-Z0-9_/\-\u4e00-\u9fff]+$/.test(tag))));
+}
+
+function applyTaskTags(rawText: string, tagText: string) {
+  const inputTags = normalizeTagInput(tagText);
+  if (inputTags.length === 0) return rawText.trim();
+
+  const existingTags = extractTags(rawText);
+  const nextTags = Array.from(new Set([...existingTags, ...inputTags]));
+  return appendTags(removeAllTaskTags(rawText), nextTags);
+}
+
+function replaceTaskTags(rawText: string, tagText: string, categoryTags: Record<Exclude<Category, "pool">, string>) {
+  const categoryNames = new Set(Object.values(categoryTags).map((tag) => tag.replace(/^#/, "").toLowerCase()));
+  const nextTags = normalizeTagInput(tagText).filter((tag) => !categoryNames.has(tag.toLowerCase()));
+  return appendTags(removeAllTaskTags(rawText), nextTags);
+}
+
+function removeAllTaskTags(rawText: string) {
+  return rawText
+    .replace(/#([a-zA-Z0-9_/\-\u4e00-\u9fff]+)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function appendTags(rawText: string, tags: string[]) {
+  const cleaned = rawText.trim();
+  const suffix = tags.map((tag) => `#${tag}`).join(" ");
+  return [cleaned, suffix].filter(Boolean).join(" ");
+}
+
+function getEditableTaskTags(task: TaskItem, categoryTags: Record<Exclude<Category, "pool">, string>) {
+  const categoryNames = new Set(Object.values(categoryTags).map((tag) => tag.replace(/^#/, "").toLowerCase()));
+  return task.tags.filter((tag) => !categoryNames.has(tag.toLowerCase()));
 }
 
 function extractCollaborators(raw: string): string[] {
