@@ -7,6 +7,7 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  setIcon,
   TFile,
   WorkspaceLeaf,
   moment
@@ -287,7 +288,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
       ...normalizeAttachmentInput(attachmentText)
     ];
     const file = await this.ensureMarkdownFile(path);
-    await this.app.vault.process(file, (data) => appendBlock(data, block));
+    await this.app.vault.process(file, (data) => prependBlock(data, block));
     this.refreshView();
     new Notice("已创建任务");
   }
@@ -597,7 +598,7 @@ class AgentTaskBoardView extends ItemView {
     let tasks = await this.plugin.collectTasks();
     let completedTasks = await this.plugin.collectCompletedTasks();
     tasks.sort(compareTasks);
-    completedTasks.sort(compareTasks);
+    completedTasks.sort(compareCompletedTasks);
 
     this.renderFilterToolbar(outer, [...tasks, ...completedTasks]);
     tasks = this.applyFilters(tasks);
@@ -791,6 +792,14 @@ class AgentTaskBoardView extends ItemView {
     });
 
     const title = top.createDiv({ cls: "atb-task-title", text: task.text });
+    const editButton = top.createEl("button", { cls: "atb-card-edit" });
+    editButton.setAttribute("aria-label", "编辑任务");
+    editButton.setAttribute("title", "编辑任务");
+    setIcon(editButton, "pencil");
+    editButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      new EditTaskModal(this.app, this.plugin, task).open();
+    });
 
     const chips = card.createDiv({ cls: "atb-chips" });
     if (task.collaborators.length > 0) {
@@ -876,13 +885,6 @@ class AgentTaskBoardView extends ItemView {
     } else {
       details.createDiv({ cls: "atb-detail-empty", text: "无附件" });
     }
-
-    const actions = details.createDiv({ cls: "atb-detail-actions" });
-    const editButton = actions.createEl("button", { text: "编辑" });
-    editButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      new EditTaskModal(this.app, this.plugin, task).open();
-    });
 
   }
 
@@ -1441,6 +1443,22 @@ function appendBlock(data: string, block: string[]) {
   return appendLine(data, block.join("\n"));
 }
 
+function prependBlock(data: string, block: string[]) {
+  if (!data.trim()) return `${block.join("\n")}\n`;
+
+  const lines = data.split(/\r?\n/);
+  let insertIdx = 0;
+
+  if (lines[0]?.trim() === "---") {
+    const endIdx = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+    if (endIdx >= 0) insertIdx = endIdx + 1;
+  }
+
+  while (insertIdx < lines.length && lines[insertIdx].trim() === "") insertIdx++;
+  lines.splice(insertIdx, 0, ...block, "");
+  return lines.join("\n");
+}
+
 function getTaskBlockRange(lines: string[], startIdx: number) {
   const taskIndent = getIndentLength(lines[startIdx] ?? "");
   let end = startIdx;
@@ -1573,6 +1591,10 @@ async function ensureFolder(app: App, folderPath: string) {
 
 function compareTasks(a: TaskItem, b: TaskItem) {
   return a.file.path.localeCompare(b.file.path) || a.line - b.line;
+}
+
+function compareCompletedTasks(a: TaskItem, b: TaskItem) {
+  return b.file.path.localeCompare(a.file.path) || b.line - a.line;
 }
 
 function findLastDifferentTask(tasks: TaskItem[], taskId: string): TaskItem | null {

@@ -211,7 +211,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       ...normalizeAttachmentInput(attachmentText)
     ];
     const file = await this.ensureMarkdownFile(path);
-    await this.app.vault.process(file, (data) => appendBlock(data, block));
+    await this.app.vault.process(file, (data) => prependBlock(data, block));
     this.refreshView();
     new import_obsidian.Notice("\u5DF2\u521B\u5EFA\u4EFB\u52A1");
   }
@@ -484,7 +484,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     let tasks = await this.plugin.collectTasks();
     let completedTasks = await this.plugin.collectCompletedTasks();
     tasks.sort(compareTasks);
-    completedTasks.sort(compareTasks);
+    completedTasks.sort(compareCompletedTasks);
     this.renderFilterToolbar(outer, [...tasks, ...completedTasks]);
     tasks = this.applyFilters(tasks);
     completedTasks = this.applyCompletedFilter(this.applyFilters(completedTasks));
@@ -662,6 +662,14 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       await this.renderTasks();
     });
     const title = top.createDiv({ cls: "atb-task-title", text: task.text });
+    const editButton = top.createEl("button", { cls: "atb-card-edit" });
+    editButton.setAttribute("aria-label", "\u7F16\u8F91\u4EFB\u52A1");
+    editButton.setAttribute("title", "\u7F16\u8F91\u4EFB\u52A1");
+    (0, import_obsidian.setIcon)(editButton, "pencil");
+    editButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      new EditTaskModal(this.app, this.plugin, task).open();
+    });
     const chips = card.createDiv({ cls: "atb-chips" });
     if (task.collaborators.length > 0) {
       for (const collaborator of task.collaborators) {
@@ -742,12 +750,6 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     } else {
       details.createDiv({ cls: "atb-detail-empty", text: "\u65E0\u9644\u4EF6" });
     }
-    const actions = details.createDiv({ cls: "atb-detail-actions" });
-    const editButton = actions.createEl("button", { text: "\u7F16\u8F91" });
-    editButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      new EditTaskModal(this.app, this.plugin, task).open();
-    });
   }
   async openTaskSource(task) {
     const leaf = this.app.workspace.getLeaf(true);
@@ -1139,6 +1141,19 @@ ${line}
 function appendBlock(data, block) {
   return appendLine(data, block.join("\n"));
 }
+function prependBlock(data, block) {
+  if (!data.trim()) return `${block.join("\n")}
+`;
+  const lines = data.split(/\r?\n/);
+  let insertIdx = 0;
+  if (lines[0]?.trim() === "---") {
+    const endIdx = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+    if (endIdx >= 0) insertIdx = endIdx + 1;
+  }
+  while (insertIdx < lines.length && lines[insertIdx].trim() === "") insertIdx++;
+  lines.splice(insertIdx, 0, ...block, "");
+  return lines.join("\n");
+}
 function getTaskBlockRange(lines, startIdx) {
   const taskIndent = getIndentLength(lines[startIdx] ?? "");
   let end = startIdx;
@@ -1237,6 +1252,9 @@ async function ensureFolder(app, folderPath) {
 }
 function compareTasks(a, b) {
   return a.file.path.localeCompare(b.file.path) || a.line - b.line;
+}
+function compareCompletedTasks(a, b) {
+  return b.file.path.localeCompare(a.file.path) || b.line - a.line;
 }
 function findLastDifferentTask(tasks, taskId) {
   for (let i = tasks.length - 1; i >= 0; i--) {
