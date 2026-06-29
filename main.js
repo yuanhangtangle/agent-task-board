@@ -35,6 +35,7 @@ var DEFAULT_SETTINGS = {
   dateFormat: "YYYY-MM-DD",
   density: "compact",
   moveCompletedTasks: true,
+  sshRemotePathPrefixes: [],
   taskOrder: {
     foreground: [],
     agent: [],
@@ -90,6 +91,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.settings.taskOrder = normalizeTaskOrder(this.settings.taskOrder);
+    this.settings.sshRemotePathPrefixes = normalizeRemotePathPrefixes(this.settings.sshRemotePathPrefixes);
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -140,7 +142,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
           category,
           tags,
           collaborators,
-          links: extractLinks([raw, ...attachmentLines]),
+          links: extractLinks([raw, ...attachmentLines], this.settings.sshRemotePathPrefixes),
           subtasks,
           attachmentLines,
           created: created ?? void 0,
@@ -189,7 +191,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         category: "completed",
         tags,
         collaborators,
-        links: extractLinks([raw, ...attachmentLines]),
+        links: extractLinks([raw, ...attachmentLines], this.settings.sshRemotePathPrefixes),
         subtasks,
         attachmentLines,
         created: created ?? void 0,
@@ -1135,6 +1137,14 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.moveCompletedTasks = value;
       await this.plugin.saveSettings();
     }));
+    new import_obsidian.Setting(containerEl).setName("SSH \u8FDC\u7AEF\u8DEF\u5F84\u524D\u7F00").setDesc("\u6BCF\u884C\u4E00\u4E2A\u8DEF\u5F84\u524D\u7F00\u3002\u9644\u4EF6\u4EE5\u8FD9\u4E9B\u524D\u7F00\u5F00\u5934\u65F6\uFF0C\u4F1A\u4F5C\u4E3A\u670D\u52A1\u5668\u8DEF\u5F84\u8BC6\u522B\uFF0C\u70B9\u51FB\u540E\u590D\u5236\u8DEF\u5F84\u3002").addTextArea((text) => {
+      text.inputEl.rows = 4;
+      text.setValue(this.plugin.settings.sshRemotePathPrefixes.join("\n"));
+      text.onChange(async (value) => {
+        this.plugin.settings.sshRemotePathPrefixes = normalizeRemotePathPrefixes(value.split(/\r?\n/));
+        await this.plugin.saveSettings();
+      });
+    });
     new import_obsidian.Setting(containerEl).setName("\u524D\u53F0\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.foregroundTag).onChange(async (value) => {
       this.plugin.settings.foregroundTag = value.trim() || "#foreground";
       await this.plugin.saveSettings();
@@ -1398,6 +1408,13 @@ function normalizeTaskOrder(order) {
     pool: Array.isArray(order?.pool) ? order.pool : []
   };
 }
+function normalizeRemotePathPrefixes(prefixes) {
+  return Array.from(new Set((Array.isArray(prefixes) ? prefixes : []).map((prefix) => prefix.trim()).filter((prefix) => prefix.startsWith("/")).map((prefix) => prefix.replace(/\/+$/, "") || "/")));
+}
+function remotePathMatchesPrefix(path, prefix) {
+  if (prefix === "/") return path.startsWith("/");
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
 function isActiveCategory(category) {
   return category !== "completed";
 }
@@ -1456,17 +1473,17 @@ function extractCollaborators(raw) {
   while ((match = re.exec(raw)) !== null) collaborators.push(match[1]);
   return Array.from(new Set(collaborators));
 }
-function extractLinks(lines) {
+function extractLinks(lines, sshRemotePathPrefixes = []) {
   const links = [];
   const seen = /* @__PURE__ */ new Set();
-  const markdownLinkRe = /\[([^\]]+)\]((?:\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+|file:\/\/[^\s)]+)\)))/g;
-  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+|file:\/\/[^\s<>)\]]+)/g;
+  const markdownLinkRe = /\[([^\]]+)\]((?:\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+|file:\/\/[^\s)]+|ssh:\/\/[^\s)]+)\)))/g;
+  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+|file:\/\/[^\s<>)\]]+|ssh:\/\/[^\s<>)\]]+)/g;
   for (const line of lines) {
     let markdownMatch;
     while ((markdownMatch = markdownLinkRe.exec(line)) !== null) {
       const url = trimUrl(markdownMatch[3]);
       if (!seen.has(url)) {
-        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
+        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url, type: getLinkType(url) });
         seen.add(url);
       }
     }
@@ -1474,11 +1491,11 @@ function extractLinks(lines) {
     while ((urlMatch = urlRe.exec(line)) !== null) {
       const url = trimUrl(urlMatch[1]);
       if (!seen.has(url)) {
-        links.push({ label: inferLinkLabel(line, url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
+        links.push({ label: inferLinkLabel(line, url), url, type: getLinkType(url) });
         seen.add(url);
       }
     }
-    const localFile = extractLocalFileAttachment(line);
+    const localFile = extractLocalFileAttachment(line, sshRemotePathPrefixes);
     if (localFile && !seen.has(localFile.url)) {
       links.push(localFile);
       seen.add(localFile.url);
@@ -1486,22 +1503,35 @@ function extractLinks(lines) {
   }
   return links;
 }
-function extractLocalFileAttachment(line) {
+function extractLocalFileAttachment(line, sshRemotePathPrefixes = []) {
   const cleaned = cleanupAttachmentLine(line);
   if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
   const stripped = stripAttachmentLabel(cleaned);
   const path = parseLocalFilePath(cleaned) ?? (stripped === cleaned ? null : parseLocalFilePath(stripped));
-  if (!path) return null;
+  if (path) {
+    return {
+      label: inferLocalFileLabel(cleaned, path),
+      url: path,
+      type: "file"
+    };
+  }
+  const remotePath = parseConfiguredRemotePath(cleaned, sshRemotePathPrefixes) ?? (stripped === cleaned ? null : parseConfiguredRemotePath(stripped, sshRemotePathPrefixes));
+  if (!remotePath) return null;
   return {
-    label: inferLocalFileLabel(cleaned, path),
-    url: path,
-    type: "file"
+    label: inferLocalFileLabel(cleaned, remotePath),
+    url: remotePath,
+    type: "remote"
   };
 }
 function parseLocalFilePath(value) {
   const cleaned = trimUrl(value.trim());
   if (isFileAttachmentUrl(cleaned)) return cleaned;
   return null;
+}
+function parseConfiguredRemotePath(value, prefixes) {
+  const cleaned = trimUrl(value.trim());
+  if (!cleaned || hasUrlScheme(cleaned)) return null;
+  return normalizeRemotePathPrefixes(prefixes).some((prefix) => remotePathMatchesPrefix(cleaned, prefix)) ? cleaned : null;
 }
 function stripAttachmentLabel(value) {
   if (hasUrlScheme(value)) return value;
@@ -1513,6 +1543,11 @@ function inferLocalFileLabel(line, path) {
   return cleaned || linkFallbackLabel(path);
 }
 async function openAttachment(link) {
+  if (link.type === "remote") {
+    await copyTextToClipboard(sshUrlToPath(link.url));
+    new import_obsidian.Notice("\u5DF2\u590D\u5236\u670D\u52A1\u5668\u8DEF\u5F84");
+    return;
+  }
   if (link.type !== "file") {
     window.open(link.url, "_blank");
     return;
@@ -1542,6 +1577,13 @@ function inferLinkLabel(line, url) {
   return cleaned || linkFallbackLabel(url);
 }
 function linkFallbackLabel(url) {
+  if (isSshAttachmentUrl(url)) {
+    const path = sshUrlToPath(url);
+    return path.split(/[\\/]/).filter(Boolean).pop() || path.slice(0, 60);
+  }
+  if (url.startsWith("/")) {
+    return url.split(/[\\/]/).filter(Boolean).pop() || url.slice(0, 60);
+  }
   if (isFileAttachmentUrl(url) || parseLocalFilePath(url)) {
     const path = fileUrlToPath(url);
     return path.split(/[\\/]/).filter(Boolean).pop() || path.slice(0, 60);
@@ -1558,6 +1600,14 @@ function trimUrl(url) {
 }
 function isFileAttachmentUrl(value) {
   return /^file:\/\//i.test(value);
+}
+function isSshAttachmentUrl(value) {
+  return /^ssh:\/\//i.test(value);
+}
+function getLinkType(url) {
+  if (isFileAttachmentUrl(url)) return "file";
+  if (isSshAttachmentUrl(url)) return "remote";
+  return "url";
 }
 function hasUrlScheme(value) {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
@@ -1576,6 +1626,31 @@ function pathToFileUrl(path) {
   const normalized = path.replace(/\\/g, "/");
   if (/^[a-zA-Z]:\//.test(normalized)) return `file:///${encodeURI(normalized)}`;
   return `file://${encodeURI(normalized)}`;
+}
+function sshUrlToPath(value) {
+  const withoutScheme = value.replace(/^ssh:\/\//i, "");
+  const pathStart = withoutScheme.indexOf("/");
+  const path = withoutScheme.startsWith("/") ? withoutScheme : pathStart >= 0 ? withoutScheme.slice(pathStart) : "";
+  if (!path) return value;
+  try {
+    return decodeURIComponent(path).replace(/^\/+/, "/");
+  } catch {
+    return path.replace(/^\/+/, "/");
+  }
+}
+async function copyTextToClipboard(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
 }
 function buildFocusPlannerTaskPayload(task) {
   return {

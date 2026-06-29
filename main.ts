@@ -33,6 +33,7 @@ interface AgentTaskBoardSettings {
   density: "comfortable" | "compact";
   moveCompletedTasks: boolean;
   taskOrder: Record<Category, string[]>;
+  sshRemotePathPrefixes: string[];
 }
 
 const DEFAULT_SETTINGS: AgentTaskBoardSettings = {
@@ -46,6 +47,7 @@ const DEFAULT_SETTINGS: AgentTaskBoardSettings = {
   dateFormat: "YYYY-MM-DD",
   density: "compact",
   moveCompletedTasks: true,
+  sshRemotePathPrefixes: [],
   taskOrder: {
     foreground: [],
     agent: [],
@@ -109,7 +111,7 @@ interface FocusPlannerTaskPayload {
 interface TaskLink {
   label: string;
   url: string;
-  type: "url" | "file";
+  type: "url" | "file" | "remote";
 }
 
 const CATEGORY_LABELS: Record<BoardCategory, string> = {
@@ -170,6 +172,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.settings.taskOrder = normalizeTaskOrder(this.settings.taskOrder);
+    this.settings.sshRemotePathPrefixes = normalizeRemotePathPrefixes(this.settings.sshRemotePathPrefixes);
   }
 
   async saveSettings() {
@@ -228,7 +231,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
           category,
           tags,
           collaborators,
-          links: extractLinks([raw, ...attachmentLines]),
+          links: extractLinks([raw, ...attachmentLines], this.settings.sshRemotePathPrefixes),
           subtasks,
           attachmentLines,
           created: created ?? undefined,
@@ -284,7 +287,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
         category: "completed",
         tags,
         collaborators,
-        links: extractLinks([raw, ...attachmentLines]),
+        links: extractLinks([raw, ...attachmentLines], this.settings.sshRemotePathPrefixes),
         subtasks,
         attachmentLines,
         created: created ?? undefined,
@@ -1432,6 +1435,18 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
+      .setName("SSH 远端路径前缀")
+      .setDesc("每行一个路径前缀。附件以这些前缀开头时，会作为服务器路径识别，点击后复制路径。")
+      .addTextArea((text) => {
+        text.inputEl.rows = 4;
+        text.setValue(this.plugin.settings.sshRemotePathPrefixes.join("\n"));
+        text.onChange(async (value) => {
+          this.plugin.settings.sshRemotePathPrefixes = normalizeRemotePathPrefixes(value.split(/\r?\n/));
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
       .setName("前台任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.foregroundTag)
@@ -1792,6 +1807,18 @@ function normalizeTaskOrder(order: Partial<Record<Category, string[]>> | undefin
   };
 }
 
+function normalizeRemotePathPrefixes(prefixes: string[] | undefined) {
+  return Array.from(new Set((Array.isArray(prefixes) ? prefixes : [])
+    .map((prefix) => prefix.trim())
+    .filter((prefix) => prefix.startsWith("/"))
+    .map((prefix) => prefix.replace(/\/+$/, "") || "/")));
+}
+
+function remotePathMatchesPrefix(path: string, prefix: string) {
+  if (prefix === "/") return path.startsWith("/");
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
 function isActiveCategory(category: BoardCategory): category is Category {
   return category !== "completed";
 }
@@ -1871,18 +1898,18 @@ function extractCollaborators(raw: string): string[] {
   return Array.from(new Set(collaborators));
 }
 
-function extractLinks(lines: string[]): TaskLink[] {
+function extractLinks(lines: string[], sshRemotePathPrefixes: string[] = []): TaskLink[] {
   const links: TaskLink[] = [];
   const seen = new Set<string>();
-  const markdownLinkRe = /\[([^\]]+)\]((?:\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+|file:\/\/[^\s)]+)\)))/g;
-  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+|file:\/\/[^\s<>)\]]+)/g;
+  const markdownLinkRe = /\[([^\]]+)\]((?:\((https?:\/\/[^\s)]+|obsidian:\/\/[^\s)]+|file:\/\/[^\s)]+|ssh:\/\/[^\s)]+)\)))/g;
+  const urlRe = /(https?:\/\/[^\s<>)\]]+|obsidian:\/\/[^\s<>)\]]+|file:\/\/[^\s<>)\]]+|ssh:\/\/[^\s<>)\]]+)/g;
 
   for (const line of lines) {
     let markdownMatch: RegExpExecArray | null;
     while ((markdownMatch = markdownLinkRe.exec(line)) !== null) {
       const url = trimUrl(markdownMatch[3]);
       if (!seen.has(url)) {
-        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
+        links.push({ label: markdownMatch[1].trim() || linkFallbackLabel(url), url, type: getLinkType(url) });
         seen.add(url);
       }
     }
@@ -1891,12 +1918,12 @@ function extractLinks(lines: string[]): TaskLink[] {
     while ((urlMatch = urlRe.exec(line)) !== null) {
       const url = trimUrl(urlMatch[1]);
       if (!seen.has(url)) {
-        links.push({ label: inferLinkLabel(line, url), url, type: isFileAttachmentUrl(url) ? "file" : "url" });
+        links.push({ label: inferLinkLabel(line, url), url, type: getLinkType(url) });
         seen.add(url);
       }
     }
 
-    const localFile = extractLocalFileAttachment(line);
+    const localFile = extractLocalFileAttachment(line, sshRemotePathPrefixes);
     if (localFile && !seen.has(localFile.url)) {
       links.push(localFile);
       seen.add(localFile.url);
@@ -1906,17 +1933,27 @@ function extractLinks(lines: string[]): TaskLink[] {
   return links;
 }
 
-function extractLocalFileAttachment(line: string): TaskLink | null {
+function extractLocalFileAttachment(line: string, sshRemotePathPrefixes: string[] = []): TaskLink | null {
   const cleaned = cleanupAttachmentLine(line);
   if (hasUrlScheme(cleaned) && !isFileAttachmentUrl(cleaned)) return null;
 
   const stripped = stripAttachmentLabel(cleaned);
   const path = parseLocalFilePath(cleaned) ?? (stripped === cleaned ? null : parseLocalFilePath(stripped));
-  if (!path) return null;
+  if (path) {
+    return {
+      label: inferLocalFileLabel(cleaned, path),
+      url: path,
+      type: "file"
+    };
+  }
+
+  const remotePath = parseConfiguredRemotePath(cleaned, sshRemotePathPrefixes)
+    ?? (stripped === cleaned ? null : parseConfiguredRemotePath(stripped, sshRemotePathPrefixes));
+  if (!remotePath) return null;
   return {
-    label: inferLocalFileLabel(cleaned, path),
-    url: path,
-    type: "file"
+    label: inferLocalFileLabel(cleaned, remotePath),
+    url: remotePath,
+    type: "remote"
   };
 }
 
@@ -1924,6 +1961,15 @@ function parseLocalFilePath(value: string) {
   const cleaned = trimUrl(value.trim());
   if (isFileAttachmentUrl(cleaned)) return cleaned;
   return null;
+}
+
+function parseConfiguredRemotePath(value: string, prefixes: string[]) {
+  const cleaned = trimUrl(value.trim());
+  if (!cleaned || hasUrlScheme(cleaned)) return null;
+
+  return normalizeRemotePathPrefixes(prefixes).some((prefix) => remotePathMatchesPrefix(cleaned, prefix))
+    ? cleaned
+    : null;
 }
 
 function stripAttachmentLabel(value: string) {
@@ -1938,6 +1984,12 @@ function inferLocalFileLabel(line: string, path: string) {
 }
 
 async function openAttachment(link: TaskLink) {
+  if (link.type === "remote") {
+    await copyTextToClipboard(sshUrlToPath(link.url));
+    new Notice("已复制服务器路径");
+    return;
+  }
+
   if (link.type !== "file") {
     window.open(link.url, "_blank");
     return;
@@ -1975,6 +2027,13 @@ function inferLinkLabel(line: string, url: string) {
 }
 
 function linkFallbackLabel(url: string) {
+  if (isSshAttachmentUrl(url)) {
+    const path = sshUrlToPath(url);
+    return path.split(/[\\/]/).filter(Boolean).pop() || path.slice(0, 60);
+  }
+  if (url.startsWith("/")) {
+    return url.split(/[\\/]/).filter(Boolean).pop() || url.slice(0, 60);
+  }
   if (isFileAttachmentUrl(url) || parseLocalFilePath(url)) {
     const path = fileUrlToPath(url);
     return path.split(/[\\/]/).filter(Boolean).pop() || path.slice(0, 60);
@@ -1993,6 +2052,16 @@ function trimUrl(url: string) {
 
 function isFileAttachmentUrl(value: string) {
   return /^file:\/\//i.test(value);
+}
+
+function isSshAttachmentUrl(value: string) {
+  return /^ssh:\/\//i.test(value);
+}
+
+function getLinkType(url: string): TaskLink["type"] {
+  if (isFileAttachmentUrl(url)) return "file";
+  if (isSshAttachmentUrl(url)) return "remote";
+  return "url";
 }
 
 function hasUrlScheme(value: string) {
@@ -2014,6 +2083,38 @@ function pathToFileUrl(path: string) {
   const normalized = path.replace(/\\/g, "/");
   if (/^[a-zA-Z]:\//.test(normalized)) return `file:///${encodeURI(normalized)}`;
   return `file://${encodeURI(normalized)}`;
+}
+
+function sshUrlToPath(value: string) {
+  const withoutScheme = value.replace(/^ssh:\/\//i, "");
+  const pathStart = withoutScheme.indexOf("/");
+  const path = withoutScheme.startsWith("/")
+    ? withoutScheme
+    : pathStart >= 0 ? withoutScheme.slice(pathStart) : "";
+
+  if (!path) return value;
+
+  try {
+    return decodeURIComponent(path).replace(/^\/+/, "/");
+  } catch {
+    return path.replace(/^\/+/, "/");
+  }
+}
+
+async function copyTextToClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
 }
 
 function buildFocusPlannerTaskPayload(task: TaskItem): FocusPlannerTaskPayload {
