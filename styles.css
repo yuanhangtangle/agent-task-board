@@ -739,6 +739,16 @@
   margin-top: 16px;
 }
 
+.atb-modal-buttons-split {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.atb-modal-action-buttons {
+  display: flex;
+  gap: 8px;
+}
+
 @media (max-width: 720px) {
   .atb-board {
     grid-template-columns: 1fr;

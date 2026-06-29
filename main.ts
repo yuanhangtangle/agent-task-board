@@ -1352,13 +1352,22 @@ class EditTaskModal extends Modal {
       this.onOpen();
     });
 
-    const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
-    const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "保存" });
+    const buttons = contentEl.createDiv({ cls: "atb-modal-buttons atb-modal-buttons-split" });
+    const deleteButton = buttons.createEl("button", { cls: "mod-warning", text: "删除" });
+    deleteButton.addEventListener("click", async () => {
+      if (!window.confirm("确定删除这个任务吗？")) return;
+
+      await this.plugin.deleteTask(this.task);
+      this.close();
+    });
+
+    const actionButtons = buttons.createDiv({ cls: "atb-modal-action-buttons" });
+    const saveButton = actionButtons.createEl("button", { cls: "mod-cta", text: "保存" });
     saveButton.addEventListener("click", async () => {
       await this.plugin.updateTask(this.task, this.rawText, this.subtaskText, this.attachmentText, this.tagText);
       this.close();
     });
-    const cancelButton = buttons.createEl("button", { text: "取消" });
+    const cancelButton = actionButtons.createEl("button", { text: "取消" });
     cancelButton.addEventListener("click", () => this.close());
   }
 

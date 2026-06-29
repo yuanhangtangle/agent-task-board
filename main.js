@@ -1086,13 +1086,20 @@ var EditTaskModal = class extends import_obsidian.Modal {
       this.attachmentText = appendAttachmentText(this.attachmentText, paths);
       this.onOpen();
     });
-    const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
-    const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "\u4FDD\u5B58" });
+    const buttons = contentEl.createDiv({ cls: "atb-modal-buttons atb-modal-buttons-split" });
+    const deleteButton = buttons.createEl("button", { cls: "mod-warning", text: "\u5220\u9664" });
+    deleteButton.addEventListener("click", async () => {
+      if (!window.confirm("\u786E\u5B9A\u5220\u9664\u8FD9\u4E2A\u4EFB\u52A1\u5417\uFF1F")) return;
+      await this.plugin.deleteTask(this.task);
+      this.close();
+    });
+    const actionButtons = buttons.createDiv({ cls: "atb-modal-action-buttons" });
+    const saveButton = actionButtons.createEl("button", { cls: "mod-cta", text: "\u4FDD\u5B58" });
     saveButton.addEventListener("click", async () => {
       await this.plugin.updateTask(this.task, this.rawText, this.subtaskText, this.attachmentText, this.tagText);
       this.close();
     });
-    const cancelButton = buttons.createEl("button", { text: "\u53D6\u6D88" });
+    const cancelButton = actionButtons.createEl("button", { text: "\u53D6\u6D88" });
     cancelButton.addEventListener("click", () => this.close());
   }
   onClose() {
