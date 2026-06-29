@@ -52,6 +52,7 @@ var CATEGORY_LABELS = {
   completed: "\u5DF2\u5B8C\u6210"
 };
 var ACTIVE_CATEGORIES = ["foreground", "agent", "collab", "inqueue", "pool"];
+var FOCUS_PLANNER_TASK_MIME = "application/x-focus-planner-task";
 var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
   async onload() {
     await this.loadSettings();
@@ -120,7 +121,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         const raw = match[2];
         const blockRange = getTaskBlockRange(lines, i);
         const originalBlock = lines.slice(i, blockRange.end + 1);
-        const attachmentLines = originalBlock.slice(1);
+        const { subtasks, attachmentLines } = splitTaskBlockChildren(originalBlock);
         const tags = extractTags(raw);
         const collaborators = extractCollaborators(raw);
         const category = classifyTask(raw, categoryTags);
@@ -140,6 +141,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
           tags,
           collaborators,
           links: extractLinks([raw, ...attachmentLines]),
+          subtasks,
           attachmentLines,
           created: created ?? void 0,
           start: start ?? void 0,
@@ -147,6 +149,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
           originalLine: line,
           originalBlock
         });
+        i = blockRange.end;
       }
     }
     return tasks;
@@ -167,7 +170,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       const raw = match[2];
       const blockRange = getTaskBlockRange(lines, i);
       const originalBlock = lines.slice(i, blockRange.end + 1);
-      const attachmentLines = originalBlock.slice(1);
+      const { subtasks, attachmentLines } = splitTaskBlockChildren(originalBlock);
       const tags = extractTags(raw);
       const collaborators = extractCollaborators(raw);
       const completed = extractCompletedDate(raw);
@@ -187,6 +190,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         tags,
         collaborators,
         links: extractLinks([raw, ...attachmentLines]),
+        subtasks,
         attachmentLines,
         created: created ?? void 0,
         start: start ?? void 0,
@@ -195,10 +199,11 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         originalLine: line,
         originalBlock
       });
+      i = blockRange.end;
     }
     return tasks;
   }
-  async createTask(text, category, targetFilePath, attachmentText = "", tagText = "") {
+  async createTask(text, category, targetFilePath, subtaskText = "", attachmentText = "", tagText = "") {
     const cleaned = applyTaskTags(text, tagText).trim();
     if (!cleaned) return;
     const path = normalizePath(targetFilePath || this.settings.inboxFile);
@@ -208,6 +213,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     }
     const block = [
       buildTaskLine(cleaned, category, this.getCategoryTags()),
+      ...normalizeSubtaskInput(subtaskText),
       ...normalizeAttachmentInput(attachmentText)
     ];
     const file = await this.ensureMarkdownFile(path);
@@ -215,7 +221,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     this.refreshView();
     new import_obsidian.Notice("\u5DF2\u521B\u5EFA\u4EFB\u52A1");
   }
-  async updateTask(task, rawText, attachmentText, tagText = "") {
+  async updateTask(task, rawText, subtaskText, attachmentText, tagText = "") {
     const categoryTags = this.getCategoryTags();
     const nextRaw = replaceTaskTags(rawText, tagText, categoryTags).trim();
     if (!nextRaw) {
@@ -224,6 +230,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     }
     const nextBlock = [
       buildTaskHeaderLine(task, nextRaw, categoryTags),
+      ...normalizeSubtaskInput(subtaskText),
       ...attachmentText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => `  - ${line.replace(/^[-*]\s+/, "")}`)
     ];
     await this.replaceTaskBlock(task, nextBlock);
@@ -237,6 +244,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     ];
     const nextBlock = [
       buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
+      ...task.subtasks.map((subtask) => subtask.originalLine),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
     await this.replaceTaskBlock(task, nextBlock);
@@ -251,6 +259,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     }
     const nextBlock = [
       buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
+      ...task.subtasks.map((subtask) => subtask.originalLine),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
     await this.replaceTaskBlock(task, nextBlock);
@@ -262,7 +271,29 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     this.refreshView();
     new import_obsidian.Notice("\u5DF2\u5220\u9664\u4EFB\u52A1");
   }
+  async toggleSubtask(task, subtask, completed) {
+    await this.app.vault.process(task.file, (data) => {
+      const lines = data.split(/\r?\n/);
+      const idx = findCurrentTaskLine(lines, task);
+      if (idx < 0) {
+        new import_obsidian.Notice("\u4EFB\u52A1\u6E90\u884C\u5DF2\u53D8\u5316\uFF0C\u672A\u5199\u56DE\u5B50\u4EFB\u52A1");
+        return data;
+      }
+      const targetIdx = idx + subtask.lineOffset;
+      if (targetIdx < 0 || targetIdx >= lines.length || !/^(\s*[-*]\s+\[[ xX]\]\s+)/.test(lines[targetIdx])) {
+        new import_obsidian.Notice("\u5B50\u4EFB\u52A1\u6E90\u884C\u5DF2\u53D8\u5316\uFF0C\u672A\u5199\u56DE");
+        return data;
+      }
+      lines[targetIdx] = lines[targetIdx].replace(/^(\s*[-*]\s+\[)[ xX](\]\s+)/, `$1${completed ? "x" : " "}$2`);
+      return lines.join("\n");
+    });
+    this.refreshView();
+  }
   async completeTask(task) {
+    if (task.subtasks.some((subtask) => !subtask.completed)) {
+      new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u6240\u6709\u5B50\u4EFB\u52A1");
+      return;
+    }
     const today = (0, import_obsidian.moment)().format(this.settings.dateFormat);
     const completedBlock = [...task.originalBlock];
     let completedLine = completedBlock[0].replace(/^(\s*[-*]\s+\[)\s(\]\s+)/, "$1x$2");
@@ -459,6 +490,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     this.filterMode = "AND";
     this.completedFilter = "7d";
     this.expandedTaskIds = /* @__PURE__ */ new Set();
+    this.expandedSubtaskIds = /* @__PURE__ */ new Set();
     this.plugin = plugin;
   }
   getViewType() {
@@ -537,6 +569,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
             tags: [],
             collaborators: [],
             links: [],
+            subtasks: [],
             attachmentLines: []
           }, category, targetTask, targetTask ? "after" : "end");
         } catch (error) {
@@ -581,7 +614,10 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       task.created ? `\u521B\u5EFA ${(0, import_obsidian.moment)(task.created).format(this.plugin.settings.dateFormat)}` : ""
     ].filter(Boolean);
     const isExpanded = this.expandedTaskIds.has(task.id);
-    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" \xB7 ") } });
+    const isSubtasksExpanded = this.expandedSubtaskIds.has(task.id);
+    const incompleteSubtasks = task.subtasks.filter((subtask) => !subtask.completed).length;
+    const isCompletionBlocked = task.category !== "completed" && incompleteSubtasks > 0;
+    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded || isSubtasksExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" \xB7 ") } });
     card.addEventListener("dragstart", (ev) => {
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
@@ -591,6 +627,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
         originalBlock: task.originalBlock,
         category: task.category
       }));
+      ev.dataTransfer?.setData(FOCUS_PLANNER_TASK_MIME, JSON.stringify(buildFocusPlannerTaskPayload(task)));
       ev.dataTransfer?.setData("text/plain", task.text);
       card.addClass("is-dragging");
     });
@@ -642,6 +679,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
           tags: [],
           collaborators: [],
           links: [],
+          subtasks: [],
           attachmentLines: []
         }, task.category, task, getInsertPosition(card, ev));
         await this.renderTasks();
@@ -654,7 +692,8 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
     checkbox.checked = task.category === "completed";
-    checkbox.disabled = task.category === "completed";
+    checkbox.disabled = task.category === "completed" || isCompletionBlocked;
+    if (isCompletionBlocked) checkbox.setAttribute("title", "\u5148\u5B8C\u6210\u6240\u6709\u5B50\u4EFB\u52A1");
     checkbox.addEventListener("click", (event) => event.stopPropagation());
     checkbox.addEventListener("change", async () => {
       if (task.category === "completed") return;
@@ -713,6 +752,20 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       event.stopPropagation();
       await this.openTaskSource(task);
     });
+    if (task.subtasks.length > 0) {
+      const completedSubtasks = task.subtasks.length - incompleteSubtasks;
+      const subtaskIndicator = footer.createEl("button", {
+        cls: `atb-subtask-indicator ${incompleteSubtasks === 0 ? "is-complete" : ""}`,
+        text: `\u5B50\u4EFB\u52A1 ${completedSubtasks}/${task.subtasks.length}`
+      });
+      subtaskIndicator.setAttribute("title", isSubtasksExpanded ? "\u6536\u8D77\u5B50\u4EFB\u52A1" : "\u5C55\u5F00\u5B50\u4EFB\u52A1");
+      subtaskIndicator.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (this.expandedSubtaskIds.has(task.id)) this.expandedSubtaskIds.delete(task.id);
+        else this.expandedSubtaskIds.add(task.id);
+        void this.renderTasks();
+      });
+    }
     const linkIndicator = footer.createEl("button", {
       cls: `atb-link-indicator ${task.links.length === 0 ? "is-empty" : ""}`,
       text: `\u9644\u4EF6 ${task.links.length}`
@@ -724,8 +777,26 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       else this.expandedTaskIds.add(task.id);
       void this.renderTasks();
     });
+    if (isSubtasksExpanded) this.renderSubtaskDetails(card, task);
     if (isExpanded) this.renderTaskDetails(card, task);
     return card;
+  }
+  renderSubtaskDetails(card, task) {
+    const details = card.createDiv({ cls: "atb-subtask-details" });
+    for (const subtask of task.subtasks) {
+      const row = details.createDiv({ cls: "atb-subtask-row" });
+      const checkbox = row.createEl("input", { type: "checkbox" });
+      checkbox.addClass("atb-subtask-box");
+      checkbox.checked = subtask.completed;
+      checkbox.disabled = task.category === "completed";
+      checkbox.addEventListener("click", (event) => event.stopPropagation());
+      checkbox.addEventListener("change", async () => {
+        await this.plugin.toggleSubtask(task, subtask, checkbox.checked);
+        await this.renderTasks();
+      });
+      const title = row.createDiv({ cls: "atb-subtask-title", text: subtask.text });
+      title.toggleClass("is-complete", subtask.completed);
+    }
   }
   renderTaskDetails(card, task) {
     const details = card.createDiv({ cls: "atb-card-details" });
@@ -914,6 +985,7 @@ var CreateTaskModal = class extends import_obsidian.Modal {
   constructor(app, plugin, initialCategory = "foreground") {
     super(app);
     this.taskText = "";
+    this.subtaskText = "";
     this.tagText = "";
     this.attachmentText = "";
     this.plugin = plugin;
@@ -932,6 +1004,12 @@ var CreateTaskModal = class extends import_obsidian.Modal {
       text.setPlaceholder("\u5199\u4E0B\u8981\u5904\u7406\u7684 TODO\uFF0C\u53EF\u5305\u542B #tag \u548C @who");
       text.onChange((value) => this.taskText = value);
       window.setTimeout(() => text.inputEl.focus(), 50);
+    });
+    new import_obsidian.Setting(contentEl).setName("\u5B50\u4EFB\u52A1").setDesc("\u6BCF\u884C\u4E00\u4E2A\u5B50\u4EFB\u52A1\uFF1B\u4E5F\u652F\u6301\u5199 [x] \u5DF2\u5B8C\u6210 / [ ] \u672A\u5B8C\u6210\u3002").addTextArea((text) => {
+      text.inputEl.rows = 4;
+      text.setValue(this.subtaskText);
+      text.setPlaceholder("\u8C03\u7814\u65B9\u6848\n\u5B9E\u73B0\u5199\u56DE\n\u9A8C\u8BC1\u5F52\u6863");
+      text.onChange((value) => this.subtaskText = value);
     });
     new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B\u5206\u7C7B\u6807\u7B7E\u7531\u8C61\u9650\u81EA\u52A8\u7EF4\u62A4\u3002").addText((text) => {
       text.setValue(this.tagText);
@@ -958,7 +1036,7 @@ var CreateTaskModal = class extends import_obsidian.Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const createButton = buttons.createEl("button", { cls: "mod-cta", text: "\u521B\u5EFA" });
     createButton.addEventListener("click", async () => {
-      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.attachmentText, this.tagText);
+      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.subtaskText, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "\u53D6\u6D88" });
@@ -974,6 +1052,7 @@ var EditTaskModal = class extends import_obsidian.Modal {
     this.plugin = plugin;
     this.task = task;
     this.rawText = task.rawText;
+    this.subtaskText = serializeSubtasksForEdit(task.subtasks);
     this.tagText = getEditableTaskTags(task, plugin.getCategoryTags()).map((tag) => `#${tag}`).join(" ");
     this.attachmentText = task.attachmentLines.map((line) => cleanupAttachmentLine(line)).filter(Boolean).join("\n");
   }
@@ -987,6 +1066,11 @@ var EditTaskModal = class extends import_obsidian.Modal {
       text.setValue(this.rawText);
       text.onChange((value) => this.rawText = value);
       window.setTimeout(() => text.inputEl.focus(), 50);
+    });
+    new import_obsidian.Setting(contentEl).setName("\u5B50\u4EFB\u52A1").setDesc("\u6BCF\u884C\u4E00\u4E2A\u5B50\u4EFB\u52A1\uFF1B\u652F\u6301 [x] \u5DF2\u5B8C\u6210 / [ ] \u672A\u5B8C\u6210\u3002").addTextArea((text) => {
+      text.inputEl.rows = 6;
+      text.setValue(this.subtaskText);
+      text.onChange((value) => this.subtaskText = value);
     });
     new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B\u4FDD\u5B58\u65F6\u66FF\u6362\u4EFB\u52A1\u91CC\u7684\u666E\u901A\u6807\u7B7E\u3002").addText((text) => {
       text.setValue(this.tagText);
@@ -1005,7 +1089,7 @@ var EditTaskModal = class extends import_obsidian.Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "\u4FDD\u5B58" });
     saveButton.addEventListener("click", async () => {
-      await this.plugin.updateTask(this.task, this.rawText, this.attachmentText, this.tagText);
+      await this.plugin.updateTask(this.task, this.rawText, this.subtaskText, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "\u53D6\u6D88" });
@@ -1177,8 +1261,40 @@ function getIndentLength(line) {
 function normalizeAttachmentInput(value) {
   return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => `  - ${line.replace(/^[-*]\s+/, "")}`);
 }
+function normalizeSubtaskInput(value) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const match = /^\[([ xX])\]\s+(.*)$/.exec(line);
+    const completed = match?.[1]?.toLowerCase() === "x";
+    const text = (match ? match[2] : line).trim();
+    return `  - [${completed ? "x" : " "}] ${text}`;
+  });
+}
+function serializeSubtasksForEdit(subtasks) {
+  return subtasks.map((subtask) => `[${subtask.completed ? "x" : " "}] ${subtask.text}`).join("\n");
+}
 function cleanupAttachmentLine(line) {
   return line.trim().replace(/^[-*]\s+/, "").trim();
+}
+function splitTaskBlockChildren(originalBlock) {
+  const subtasks = [];
+  const attachmentLines = [];
+  for (let offset = 1; offset < originalBlock.length; offset++) {
+    const line = originalBlock[offset];
+    const subtask = parseSubtaskLine(line, offset);
+    if (subtask) subtasks.push(subtask);
+    else attachmentLines.push(line);
+  }
+  return { subtasks, attachmentLines };
+}
+function parseSubtaskLine(line, lineOffset) {
+  const match = /^(\s*[-*]\s+\[([ xX])\]\s+)(.*)$/.exec(line);
+  if (!match) return null;
+  return {
+    text: cleanupTaskText(stripCompletionMetadata(match[3])),
+    completed: match[2].toLowerCase() === "x",
+    lineOffset,
+    originalLine: line
+  };
 }
 function addLocalFilePicker(container, onSelect) {
   const wrapper = container.createDiv({ cls: "atb-file-picker" });
@@ -1453,6 +1569,35 @@ function pathToFileUrl(path) {
   const normalized = path.replace(/\\/g, "/");
   if (/^[a-zA-Z]:\//.test(normalized)) return `file:///${encodeURI(normalized)}`;
   return `file://${encodeURI(normalized)}`;
+}
+function buildFocusPlannerTaskPayload(task) {
+  return {
+    raw: task.originalLine,
+    title: task.text,
+    status: task.category === "completed" ? "done" : "todo",
+    priority: extractTaskPriority(task.rawText),
+    dueDate: task.due ? task.due.toISOString() : null,
+    scheduledDate: task.start ? task.start.toISOString() : null,
+    pomodoros: extractNumberMetadata(task.rawText, "pomo") ?? extractTomatoCount(task.rawText) ?? 0,
+    pomodorosDone: extractNumberMetadata(task.rawText, "done") ?? 0,
+    tags: task.tags,
+    sourcePath: task.file.path,
+    lineNumber: task.line + 1
+  };
+}
+function extractTaskPriority(raw) {
+  if (raw.includes("\u23EB")) return "highest";
+  if (raw.includes("\u{1F53A}")) return "high";
+  if (raw.includes("\u{1F53D}")) return "low";
+  return "normal";
+}
+function extractNumberMetadata(raw, key) {
+  const match = new RegExp(`\\[${escapeReg(key)}::\\s*(\\d+)\\]`, "i").exec(raw);
+  return match ? Number(match[1]) : null;
+}
+function extractTomatoCount(raw) {
+  const match = /(\d+)🍅/.exec(raw);
+  return match ? Number(match[1]) : null;
 }
 function extractDate(raw, key, icons) {
   const kvRe = new RegExp(`\\b${escapeReg(key)}::?\\s*(?:\\[\\[\\s*)?(${DATE_TIME_REGEX_FRAGMENT})(?:\\s*\\]\\])?`, "i");

@@ -66,6 +66,7 @@ interface TaskItem {
   tags: string[];
   collaborators: string[];
   links: TaskLink[];
+  subtasks: SubtaskItem[];
   attachmentLines: string[];
   created?: Date;
   due?: Date;
@@ -75,6 +76,13 @@ interface TaskItem {
   originalBlock: string[];
 }
 
+interface SubtaskItem {
+  text: string;
+  completed: boolean;
+  lineOffset: number;
+  originalLine: string;
+}
+
 interface DragPayload {
   id: string;
   filePath: string;
@@ -82,6 +90,20 @@ interface DragPayload {
   originalLine: string;
   originalBlock: string[];
   category: BoardCategory;
+}
+
+interface FocusPlannerTaskPayload {
+  raw: string;
+  title: string;
+  status: "todo" | "done" | "in_progress" | "cancelled" | "deferred";
+  priority: "highest" | "high" | "normal" | "low";
+  dueDate: string | null;
+  scheduledDate: string | null;
+  pomodoros: number;
+  pomodorosDone: number;
+  tags: string[];
+  sourcePath: string;
+  lineNumber: number;
 }
 
 interface TaskLink {
@@ -100,6 +122,7 @@ const CATEGORY_LABELS: Record<BoardCategory, string> = {
 };
 
 const ACTIVE_CATEGORIES: Category[] = ["foreground", "agent", "collab", "inqueue", "pool"];
+const FOCUS_PLANNER_TASK_MIME = "application/x-focus-planner-task";
 
 export default class AgentTaskBoardPlugin extends Plugin {
   settings: AgentTaskBoardSettings;
@@ -185,7 +208,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
         const raw = match[2];
         const blockRange = getTaskBlockRange(lines, i);
         const originalBlock = lines.slice(i, blockRange.end + 1);
-        const attachmentLines = originalBlock.slice(1);
+        const { subtasks, attachmentLines } = splitTaskBlockChildren(originalBlock);
         const tags = extractTags(raw);
         const collaborators = extractCollaborators(raw);
         const category = classifyTask(raw, categoryTags);
@@ -206,6 +229,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
           tags,
           collaborators,
           links: extractLinks([raw, ...attachmentLines]),
+          subtasks,
           attachmentLines,
           created: created ?? undefined,
           start: start ?? undefined,
@@ -213,6 +237,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
           originalLine: line,
           originalBlock
         });
+        i = blockRange.end;
       }
     }
 
@@ -239,7 +264,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
       const raw = match[2];
       const blockRange = getTaskBlockRange(lines, i);
       const originalBlock = lines.slice(i, blockRange.end + 1);
-      const attachmentLines = originalBlock.slice(1);
+      const { subtasks, attachmentLines } = splitTaskBlockChildren(originalBlock);
       const tags = extractTags(raw);
       const collaborators = extractCollaborators(raw);
       const completed = extractCompletedDate(raw);
@@ -260,6 +285,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
         tags,
         collaborators,
         links: extractLinks([raw, ...attachmentLines]),
+        subtasks,
         attachmentLines,
         created: created ?? undefined,
         start: start ?? undefined,
@@ -268,12 +294,13 @@ export default class AgentTaskBoardPlugin extends Plugin {
         originalLine: line,
         originalBlock
       });
+      i = blockRange.end;
     }
 
     return tasks;
   }
 
-  async createTask(text: string, category: Category, targetFilePath?: string, attachmentText = "", tagText = "") {
+  async createTask(text: string, category: Category, targetFilePath?: string, subtaskText = "", attachmentText = "", tagText = "") {
     const cleaned = applyTaskTags(text, tagText).trim();
     if (!cleaned) return;
 
@@ -285,6 +312,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
 
     const block = [
       buildTaskLine(cleaned, category, this.getCategoryTags()),
+      ...normalizeSubtaskInput(subtaskText),
       ...normalizeAttachmentInput(attachmentText)
     ];
     const file = await this.ensureMarkdownFile(path);
@@ -293,7 +321,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     new Notice("已创建任务");
   }
 
-  async updateTask(task: TaskItem, rawText: string, attachmentText: string, tagText = "") {
+  async updateTask(task: TaskItem, rawText: string, subtaskText: string, attachmentText: string, tagText = "") {
     const categoryTags = this.getCategoryTags();
     const nextRaw = replaceTaskTags(rawText, tagText, categoryTags).trim();
     if (!nextRaw) {
@@ -303,6 +331,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
 
     const nextBlock = [
       buildTaskHeaderLine(task, nextRaw, categoryTags),
+      ...normalizeSubtaskInput(subtaskText),
       ...attachmentText
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -322,6 +351,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     ];
     const nextBlock = [
       buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
+      ...task.subtasks.map((subtask) => subtask.originalLine),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
 
@@ -339,6 +369,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
 
     const nextBlock = [
       buildTaskHeaderLine(task, task.rawText, this.getCategoryTags()),
+      ...task.subtasks.map((subtask) => subtask.originalLine),
       ...normalizeAttachmentInput(nextAttachments.join("\n"))
     ];
 
@@ -353,7 +384,33 @@ export default class AgentTaskBoardPlugin extends Plugin {
     new Notice("已删除任务");
   }
 
+  async toggleSubtask(task: TaskItem, subtask: SubtaskItem, completed: boolean) {
+    await this.app.vault.process(task.file, (data) => {
+      const lines = data.split(/\r?\n/);
+      const idx = findCurrentTaskLine(lines, task);
+      if (idx < 0) {
+        new Notice("任务源行已变化，未写回子任务");
+        return data;
+      }
+
+      const targetIdx = idx + subtask.lineOffset;
+      if (targetIdx < 0 || targetIdx >= lines.length || !/^(\s*[-*]\s+\[[ xX]\]\s+)/.test(lines[targetIdx])) {
+        new Notice("子任务源行已变化，未写回");
+        return data;
+      }
+
+      lines[targetIdx] = lines[targetIdx].replace(/^(\s*[-*]\s+\[)[ xX](\]\s+)/, `$1${completed ? "x" : " "}$2`);
+      return lines.join("\n");
+    });
+    this.refreshView();
+  }
+
   async completeTask(task: TaskItem) {
+    if (task.subtasks.some((subtask) => !subtask.completed)) {
+      new Notice("请先完成所有子任务");
+      return;
+    }
+
     const today = moment().format(this.settings.dateFormat);
     const completedBlock = [...task.originalBlock];
     let completedLine = completedBlock[0].replace(/^(\s*[-*]\s+\[)\s(\]\s+)/, "$1x$2");
@@ -574,6 +631,7 @@ class AgentTaskBoardView extends ItemView {
   private filterMode: FilterMode = "AND";
   private completedFilter: CompletedFilter = "7d";
   private expandedTaskIds = new Set<string>();
+  private expandedSubtaskIds = new Set<string>();
 
   constructor(leaf: WorkspaceLeaf, plugin: AgentTaskBoardPlugin) {
     super(leaf);
@@ -656,6 +714,7 @@ class AgentTaskBoardView extends ItemView {
             tags: [],
             collaborators: [],
             links: [],
+            subtasks: [],
             attachmentLines: []
           }, category, targetTask, targetTask ? "after" : "end");
         } catch (error) {
@@ -706,7 +765,10 @@ class AgentTaskBoardView extends ItemView {
     ].filter(Boolean);
 
     const isExpanded = this.expandedTaskIds.has(task.id);
-    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" · ") } });
+    const isSubtasksExpanded = this.expandedSubtaskIds.has(task.id);
+    const incompleteSubtasks = task.subtasks.filter((subtask) => !subtask.completed).length;
+    const isCompletionBlocked = task.category !== "completed" && incompleteSubtasks > 0;
+    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded || isSubtasksExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" · ") } });
     card.addEventListener("dragstart", (ev: DragEvent) => {
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
@@ -716,6 +778,7 @@ class AgentTaskBoardView extends ItemView {
         originalBlock: task.originalBlock,
         category: task.category
       } satisfies DragPayload));
+      ev.dataTransfer?.setData(FOCUS_PLANNER_TASK_MIME, JSON.stringify(buildFocusPlannerTaskPayload(task)));
       ev.dataTransfer?.setData("text/plain", task.text);
       card.addClass("is-dragging");
     });
@@ -770,6 +833,7 @@ class AgentTaskBoardView extends ItemView {
           tags: [],
           collaborators: [],
           links: [],
+          subtasks: [],
           attachmentLines: []
         }, task.category, task, getInsertPosition(card, ev));
         await this.renderTasks();
@@ -783,7 +847,8 @@ class AgentTaskBoardView extends ItemView {
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
     checkbox.checked = task.category === "completed";
-    checkbox.disabled = task.category === "completed";
+    checkbox.disabled = task.category === "completed" || isCompletionBlocked;
+    if (isCompletionBlocked) checkbox.setAttribute("title", "先完成所有子任务");
     checkbox.addEventListener("click", (event) => event.stopPropagation());
     checkbox.addEventListener("change", async () => {
       if (task.category === "completed") return;
@@ -845,6 +910,22 @@ class AgentTaskBoardView extends ItemView {
       event.stopPropagation();
       await this.openTaskSource(task);
     });
+
+    if (task.subtasks.length > 0) {
+      const completedSubtasks = task.subtasks.length - incompleteSubtasks;
+      const subtaskIndicator = footer.createEl("button", {
+        cls: `atb-subtask-indicator ${incompleteSubtasks === 0 ? "is-complete" : ""}`,
+        text: `子任务 ${completedSubtasks}/${task.subtasks.length}`
+      });
+      subtaskIndicator.setAttribute("title", isSubtasksExpanded ? "收起子任务" : "展开子任务");
+      subtaskIndicator.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (this.expandedSubtaskIds.has(task.id)) this.expandedSubtaskIds.delete(task.id);
+        else this.expandedSubtaskIds.add(task.id);
+        void this.renderTasks();
+      });
+    }
+
     const linkIndicator = footer.createEl("button", {
       cls: `atb-link-indicator ${task.links.length === 0 ? "is-empty" : ""}`,
       text: `附件 ${task.links.length}`
@@ -857,8 +938,27 @@ class AgentTaskBoardView extends ItemView {
       void this.renderTasks();
     });
 
+    if (isSubtasksExpanded) this.renderSubtaskDetails(card, task);
     if (isExpanded) this.renderTaskDetails(card, task);
     return card;
+  }
+
+  private renderSubtaskDetails(card: HTMLElement, task: TaskItem) {
+    const details = card.createDiv({ cls: "atb-subtask-details" });
+    for (const subtask of task.subtasks) {
+      const row = details.createDiv({ cls: "atb-subtask-row" });
+      const checkbox = row.createEl("input", { type: "checkbox" });
+      checkbox.addClass("atb-subtask-box");
+      checkbox.checked = subtask.completed;
+      checkbox.disabled = task.category === "completed";
+      checkbox.addEventListener("click", (event) => event.stopPropagation());
+      checkbox.addEventListener("change", async () => {
+        await this.plugin.toggleSubtask(task, subtask, checkbox.checked);
+        await this.renderTasks();
+      });
+      const title = row.createDiv({ cls: "atb-subtask-title", text: subtask.text });
+      title.toggleClass("is-complete", subtask.completed);
+    }
   }
 
   private renderTaskDetails(card: HTMLElement, task: TaskItem) {
@@ -1088,6 +1188,7 @@ class CreateTaskModal extends Modal {
   plugin: AgentTaskBoardPlugin;
   initialCategory: Category;
   taskText = "";
+  subtaskText = "";
   tagText = "";
   attachmentText = "";
   category: Category;
@@ -1115,6 +1216,16 @@ class CreateTaskModal extends Modal {
         text.setPlaceholder("写下要处理的 TODO，可包含 #tag 和 @who");
         text.onChange((value) => this.taskText = value);
         window.setTimeout(() => text.inputEl.focus(), 50);
+      });
+
+    new Setting(contentEl)
+      .setName("子任务")
+      .setDesc("每行一个子任务；也支持写 [x] 已完成 / [ ] 未完成。")
+      .addTextArea((text) => {
+        text.inputEl.rows = 4;
+        text.setValue(this.subtaskText);
+        text.setPlaceholder("调研方案\n实现写回\n验证归档");
+        text.onChange((value) => this.subtaskText = value);
       });
 
     new Setting(contentEl)
@@ -1164,7 +1275,7 @@ class CreateTaskModal extends Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const createButton = buttons.createEl("button", { cls: "mod-cta", text: "创建" });
     createButton.addEventListener("click", async () => {
-      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.attachmentText, this.tagText);
+      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.subtaskText, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "取消" });
@@ -1180,6 +1291,7 @@ class EditTaskModal extends Modal {
   plugin: AgentTaskBoardPlugin;
   task: TaskItem;
   rawText: string;
+  subtaskText: string;
   tagText: string;
   attachmentText: string;
 
@@ -1188,6 +1300,7 @@ class EditTaskModal extends Modal {
     this.plugin = plugin;
     this.task = task;
     this.rawText = task.rawText;
+    this.subtaskText = serializeSubtasksForEdit(task.subtasks);
     this.tagText = getEditableTaskTags(task, plugin.getCategoryTags()).map((tag) => `#${tag}`).join(" ");
     this.attachmentText = task.attachmentLines.map((line) => cleanupAttachmentLine(line)).filter(Boolean).join("\n");
   }
@@ -1205,6 +1318,15 @@ class EditTaskModal extends Modal {
         text.setValue(this.rawText);
         text.onChange((value) => this.rawText = value);
         window.setTimeout(() => text.inputEl.focus(), 50);
+      });
+
+    new Setting(contentEl)
+      .setName("子任务")
+      .setDesc("每行一个子任务；支持 [x] 已完成 / [ ] 未完成。")
+      .addTextArea((text) => {
+        text.inputEl.rows = 6;
+        text.setValue(this.subtaskText);
+        text.onChange((value) => this.subtaskText = value);
       });
 
     new Setting(contentEl)
@@ -1233,7 +1355,7 @@ class EditTaskModal extends Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const saveButton = buttons.createEl("button", { cls: "mod-cta", text: "保存" });
     saveButton.addEventListener("click", async () => {
-      await this.plugin.updateTask(this.task, this.rawText, this.attachmentText, this.tagText);
+      await this.plugin.updateTask(this.task, this.rawText, this.subtaskText, this.attachmentText, this.tagText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "取消" });
@@ -1491,8 +1613,50 @@ function normalizeAttachmentInput(value: string) {
     .map((line) => `  - ${line.replace(/^[-*]\s+/, "")}`);
 }
 
+function normalizeSubtaskInput(value: string) {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = /^\[([ xX])\]\s+(.*)$/.exec(line);
+      const completed = match?.[1]?.toLowerCase() === "x";
+      const text = (match ? match[2] : line).trim();
+      return `  - [${completed ? "x" : " "}] ${text}`;
+    });
+}
+
+function serializeSubtasksForEdit(subtasks: SubtaskItem[]) {
+  return subtasks.map((subtask) => `[${subtask.completed ? "x" : " "}] ${subtask.text}`).join("\n");
+}
+
 function cleanupAttachmentLine(line: string) {
   return line.trim().replace(/^[-*]\s+/, "").trim();
+}
+
+function splitTaskBlockChildren(originalBlock: string[]) {
+  const subtasks: SubtaskItem[] = [];
+  const attachmentLines: string[] = [];
+
+  for (let offset = 1; offset < originalBlock.length; offset++) {
+    const line = originalBlock[offset];
+    const subtask = parseSubtaskLine(line, offset);
+    if (subtask) subtasks.push(subtask);
+    else attachmentLines.push(line);
+  }
+
+  return { subtasks, attachmentLines };
+}
+
+function parseSubtaskLine(line: string, lineOffset: number): SubtaskItem | null {
+  const match = /^(\s*[-*]\s+\[([ xX])\]\s+)(.*)$/.exec(line);
+  if (!match) return null;
+  return {
+    text: cleanupTaskText(stripCompletionMetadata(match[3])),
+    completed: match[2].toLowerCase() === "x",
+    lineOffset,
+    originalLine: line
+  };
 }
 
 function addLocalFilePicker(container: HTMLElement, onSelect: (paths: string[]) => void) {
@@ -1841,6 +2005,39 @@ function pathToFileUrl(path: string) {
   const normalized = path.replace(/\\/g, "/");
   if (/^[a-zA-Z]:\//.test(normalized)) return `file:///${encodeURI(normalized)}`;
   return `file://${encodeURI(normalized)}`;
+}
+
+function buildFocusPlannerTaskPayload(task: TaskItem): FocusPlannerTaskPayload {
+  return {
+    raw: task.originalLine,
+    title: task.text,
+    status: task.category === "completed" ? "done" : "todo",
+    priority: extractTaskPriority(task.rawText),
+    dueDate: task.due ? task.due.toISOString() : null,
+    scheduledDate: task.start ? task.start.toISOString() : null,
+    pomodoros: extractNumberMetadata(task.rawText, "pomo") ?? extractTomatoCount(task.rawText) ?? 0,
+    pomodorosDone: extractNumberMetadata(task.rawText, "done") ?? 0,
+    tags: task.tags,
+    sourcePath: task.file.path,
+    lineNumber: task.line + 1
+  };
+}
+
+function extractTaskPriority(raw: string): FocusPlannerTaskPayload["priority"] {
+  if (raw.includes("⏫")) return "highest";
+  if (raw.includes("🔺")) return "high";
+  if (raw.includes("🔽")) return "low";
+  return "normal";
+}
+
+function extractNumberMetadata(raw: string, key: string) {
+  const match = new RegExp(`\\[${escapeReg(key)}::\\s*(\\d+)\\]`, "i").exec(raw);
+  return match ? Number(match[1]) : null;
+}
+
+function extractTomatoCount(raw: string) {
+  const match = /(\d+)🍅/.exec(raw);
+  return match ? Number(match[1]) : null;
 }
 
 function extractDate(raw: string, key: string, icons: string[]): Date | null {

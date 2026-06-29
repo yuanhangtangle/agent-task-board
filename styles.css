@@ -511,9 +511,34 @@
   cursor: pointer;
 }
 
+.atb-subtask-indicator {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in oklab, #ef4444 55%, var(--background-modifier-border));
+  border-radius: 6px;
+  background: color-mix(in oklab, #ef4444 12%, var(--background-primary));
+  color: #dc2626;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.atb-subtask-indicator.is-complete {
+  border-color: color-mix(in oklab, #22c55e 55%, var(--background-modifier-border));
+  background: color-mix(in oklab, #22c55e 12%, var(--background-primary));
+  color: #16a34a;
+}
+
 .atb-link-indicator:hover {
   border-color: var(--interactive-accent);
   background: color-mix(in oklab, var(--interactive-accent) 22%, var(--background-primary));
+}
+
+.atb-subtask-indicator:hover {
+  border-color: currentColor;
+  background: color-mix(in oklab, currentColor 18%, var(--background-primary));
 }
 
 .atb-link-indicator.is-empty {
@@ -533,6 +558,40 @@
   gap: 8px;
   padding-top: 7px;
   border-top: 1px solid var(--background-modifier-border);
+}
+
+.atb-subtask-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 7px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.atb-subtask-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.atb-subtask-box {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.atb-subtask-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-normal);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.atb-subtask-title.is-complete {
+  color: var(--text-muted);
+  text-decoration: line-through;
 }
 
 .atb-link-list {
