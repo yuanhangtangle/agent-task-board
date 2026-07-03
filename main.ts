@@ -12,6 +12,7 @@ import {
   WorkspaceLeaf,
   moment
 } from "obsidian";
+import { getCurrentSubtaskSummary } from "./subtaskSummary";
 
 const VIEW_TYPE_AGENT_TASK_BOARD = "agent-task-board-view";
 
@@ -904,6 +905,26 @@ class AgentTaskBoardView extends ItemView {
     }
     if (task.completed) {
       chips.appendChild(createChip(`完成 ${moment(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
+    }
+
+    const currentSubtask = !isSubtasksExpanded ? getCurrentSubtaskSummary(task.subtasks) : null;
+    if (currentSubtask) {
+      const summary = card.createDiv({
+        cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
+        attr: { title: `当前子任务 ${currentSubtask.completedCount}/${currentSubtask.totalCount}: ${currentSubtask.text}` }
+      });
+      const summaryBox = summary.createEl("input", { type: "checkbox" });
+      summaryBox.addClass("atb-current-subtask-box");
+      summaryBox.checked = currentSubtask.completed;
+      summaryBox.disabled = task.category === "completed" || currentSubtask.completed;
+      summaryBox.addEventListener("click", (event) => event.stopPropagation());
+      summaryBox.addEventListener("change", async () => {
+        const subtask = task.subtasks[currentSubtask.index];
+        if (!subtask || subtask.completed || task.category === "completed") return;
+        await this.plugin.toggleSubtask(task, subtask, true);
+        await this.renderTasks();
+      });
+      summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
     }
 
     const footer = card.createDiv({ cls: "atb-card-footer" });

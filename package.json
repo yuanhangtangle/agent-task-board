@@ -4,6 +4,7 @@
   "scripts": {
     "build": "esbuild main.ts --bundle --external:obsidian --format=cjs --platform=node --outfile=main.js --sourcemap",
     "dev": "esbuild main.ts --bundle --watch --external:obsidian --format=cjs --platform=node --outfile=main.js --sourcemap",
+    "test": "node --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "package": "zip -r agent-task-board-$npm_package_version.zip main.js manifest.json styles.css"
   },

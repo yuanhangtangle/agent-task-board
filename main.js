@@ -23,6 +23,24 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
+
+// subtaskSummary.ts
+function getCurrentSubtaskSummary(subtasks) {
+  if (subtasks.length === 0) return null;
+  const completedCount = subtasks.filter((subtask) => subtask.completed).length;
+  const incompleteIndex = subtasks.findIndex((subtask) => !subtask.completed);
+  const currentIndex = incompleteIndex >= 0 ? incompleteIndex : subtasks.length - 1;
+  const current = subtasks[currentIndex];
+  return {
+    index: currentIndex,
+    text: current.text,
+    completed: current.completed,
+    completedCount,
+    totalCount: subtasks.length
+  };
+}
+
+// main.ts
 var VIEW_TYPE_AGENT_TASK_BOARD = "agent-task-board-view";
 var DEFAULT_SETTINGS = {
   scanPathPatterns: ["Inbox.md", "Tasks/.*\\.md", "Projects/.*\\.md"],
@@ -746,6 +764,25 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     }
     if (task.completed) {
       chips.appendChild(createChip(`\u5B8C\u6210 ${(0, import_obsidian.moment)(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
+    }
+    const currentSubtask = !isSubtasksExpanded ? getCurrentSubtaskSummary(task.subtasks) : null;
+    if (currentSubtask) {
+      const summary = card.createDiv({
+        cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
+        attr: { title: `\u5F53\u524D\u5B50\u4EFB\u52A1 ${currentSubtask.completedCount}/${currentSubtask.totalCount}: ${currentSubtask.text}` }
+      });
+      const summaryBox = summary.createEl("input", { type: "checkbox" });
+      summaryBox.addClass("atb-current-subtask-box");
+      summaryBox.checked = currentSubtask.completed;
+      summaryBox.disabled = task.category === "completed" || currentSubtask.completed;
+      summaryBox.addEventListener("click", (event) => event.stopPropagation());
+      summaryBox.addEventListener("change", async () => {
+        const subtask = task.subtasks[currentSubtask.index];
+        if (!subtask || subtask.completed || task.category === "completed") return;
+        await this.plugin.toggleSubtask(task, subtask, true);
+        await this.renderTasks();
+      });
+      summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
     }
     const footer = card.createDiv({ cls: "atb-card-footer" });
     const source = footer.createDiv({ cls: "atb-source", text: `${task.file.basename}:${task.line + 1}` });
