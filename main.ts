@@ -12,6 +12,7 @@ import {
   WorkspaceLeaf,
   moment
 } from "obsidian";
+import { setCheckboxCompletion, stripCompletionMetadata } from "./completionMetadata";
 import { getCurrentSubtaskSummary } from "./subtaskSummary";
 
 const VIEW_TYPE_AGENT_TASK_BOARD = "agent-task-board-view";
@@ -389,6 +390,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
   }
 
   async toggleSubtask(task: TaskItem, subtask: SubtaskItem, completed: boolean) {
+    const today = moment().format(this.settings.dateFormat);
     await this.app.vault.process(task.file, (data) => {
       const lines = data.split(/\r?\n/);
       const idx = findCurrentTaskLine(lines, task);
@@ -403,7 +405,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
         return data;
       }
 
-      lines[targetIdx] = lines[targetIdx].replace(/^(\s*[-*]\s+\[)[ xX](\]\s+)/, `$1${completed ? "x" : " "}$2`);
+      lines[targetIdx] = setCheckboxCompletion(lines[targetIdx], completed, today);
       return lines.join("\n");
     });
     this.refreshView();
@@ -417,9 +419,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
 
     const today = moment().format(this.settings.dateFormat);
     const completedBlock = [...task.originalBlock];
-    let completedLine = completedBlock[0].replace(/^(\s*[-*]\s+\[)\s(\]\s+)/, "$1x$2");
-    completedLine = completedLine.replace(/\s*✅\s*\d{4}-\d{2}-\d{2}/, "");
-    completedBlock[0] = `${completedLine} ✅ ${today} <!-- from: ${task.file.path}:${task.line + 1} -->`;
+    completedBlock[0] = `${setCheckboxCompletion(completedBlock[0], true, today)} <!-- from: ${task.file.path}:${task.line + 1} -->`;
 
     if (this.settings.moveCompletedTasks && this.settings.completedTaskFile.trim()) {
       const completedFile = await this.ensureMarkdownFile(normalizePath(this.settings.completedTaskFile));
@@ -1582,13 +1582,6 @@ function restoreIncompleteTaskLine(line: string) {
   return stripCompletionMetadata(line)
     .replace(/^(\s*[-*]\s+\[)[xX](\]\s+)/, "$1 $2")
     .trimEnd();
-}
-
-function stripCompletionMetadata(raw: string) {
-  return raw
-    .replace(/\s*✅\s*\d{4}-\d{2}-\d{2}/g, "")
-    .replace(/\s*<!--\s*from:\s*.*?-->/g, "")
-    .trim();
 }
 
 function findCurrentTaskLine(lines: string[], task: TaskItem) {

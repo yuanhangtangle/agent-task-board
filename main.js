@@ -24,6 +24,15 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 
+// completionMetadata.ts
+function setCheckboxCompletion(line, completed, completedDate) {
+  const checkedLine = stripCompletionMetadata(line).replace(/^(\s*[-*]\s+\[)[ xX](\]\s+)/, `$1${completed ? "x" : " "}$2`);
+  return completed ? `${checkedLine} \u2705 ${completedDate}` : checkedLine;
+}
+function stripCompletionMetadata(raw) {
+  return raw.replace(/\s*✅\s*\d{4}-\d{2}-\d{2}/g, "").replace(/\s*<!--\s*from:\s*.*?-->/g, "").trimEnd();
+}
+
 // subtaskSummary.ts
 function getCurrentSubtaskSummary(subtasks) {
   if (subtasks.length === 0) return null;
@@ -292,6 +301,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     new import_obsidian.Notice("\u5DF2\u5220\u9664\u4EFB\u52A1");
   }
   async toggleSubtask(task, subtask, completed) {
+    const today = (0, import_obsidian.moment)().format(this.settings.dateFormat);
     await this.app.vault.process(task.file, (data) => {
       const lines = data.split(/\r?\n/);
       const idx = findCurrentTaskLine(lines, task);
@@ -304,7 +314,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         new import_obsidian.Notice("\u5B50\u4EFB\u52A1\u6E90\u884C\u5DF2\u53D8\u5316\uFF0C\u672A\u5199\u56DE");
         return data;
       }
-      lines[targetIdx] = lines[targetIdx].replace(/^(\s*[-*]\s+\[)[ xX](\]\s+)/, `$1${completed ? "x" : " "}$2`);
+      lines[targetIdx] = setCheckboxCompletion(lines[targetIdx], completed, today);
       return lines.join("\n");
     });
     this.refreshView();
@@ -316,9 +326,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     }
     const today = (0, import_obsidian.moment)().format(this.settings.dateFormat);
     const completedBlock = [...task.originalBlock];
-    let completedLine = completedBlock[0].replace(/^(\s*[-*]\s+\[)\s(\]\s+)/, "$1x$2");
-    completedLine = completedLine.replace(/\s*✅\s*\d{4}-\d{2}-\d{2}/, "");
-    completedBlock[0] = `${completedLine} \u2705 ${today} <!-- from: ${task.file.path}:${task.line + 1} -->`;
+    completedBlock[0] = `${setCheckboxCompletion(completedBlock[0], true, today)} <!-- from: ${task.file.path}:${task.line + 1} -->`;
     if (this.settings.moveCompletedTasks && this.settings.completedTaskFile.trim()) {
       const completedFile = await this.ensureMarkdownFile(normalizePath(this.settings.completedTaskFile));
       await this.removeTaskBlock(task);
@@ -1256,9 +1264,6 @@ function buildTaskHeaderLine(task, rawText, tags) {
 }
 function restoreIncompleteTaskLine(line) {
   return stripCompletionMetadata(line).replace(/^(\s*[-*]\s+\[)[xX](\]\s+)/, "$1 $2").trimEnd();
-}
-function stripCompletionMetadata(raw) {
-  return raw.replace(/\s*✅\s*\d{4}-\d{2}-\d{2}/g, "").replace(/\s*<!--\s*from:\s*.*?-->/g, "").trim();
 }
 function findCurrentTaskLine(lines, task) {
   if (lines[task.line] === task.originalLine) return task.line;
