@@ -54,6 +54,13 @@ function getCurrentSubtaskSummary(subtasks, preferredIndex) {
   };
 }
 
+// taskViewState.ts
+function getTaskViewStateKey(filePath, taskId) {
+  const hashSeparator = taskId.lastIndexOf(":");
+  const stableTaskHash = hashSeparator >= 0 ? taskId.slice(hashSeparator + 1) : taskId;
+  return `${filePath}:${stableTaskHash}`;
+}
+
 // taskDate.ts
 var BEIJING_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "Asia/Shanghai",
@@ -718,6 +725,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     return { el: panel, list, countEl };
   }
   renderTaskCard(task, taskSequence) {
+    const taskStateKey = getTaskViewStateKey(task.file.path, task.id);
     const tooltipParts = [
       task.file.path,
       `\u884C ${task.line + 1}`,
@@ -726,9 +734,9 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       task.completed ? `\u5B8C\u6210 ${(0, import_obsidian.moment)(task.completed).format(this.plugin.settings.dateFormat)}` : "",
       task.created ? `\u521B\u5EFA ${(0, import_obsidian.moment)(task.created).format(this.plugin.settings.dateFormat)}` : ""
     ].filter(Boolean);
-    const isCardExpanded = this.expandedCardIds.has(task.id);
-    const isAttachmentsExpanded = this.expandedAttachmentIds.has(task.id);
-    const isSubtasksExpanded = this.expandedSubtaskIds.has(task.id);
+    const isCardExpanded = this.expandedCardIds.has(taskStateKey);
+    const isAttachmentsExpanded = this.expandedAttachmentIds.has(taskStateKey);
+    const isSubtasksExpanded = this.expandedSubtaskIds.has(taskStateKey);
     const incompleteSubtasks = task.subtasks.filter((subtask) => !subtask.completed).length;
     const isCompletionBlocked = task.category !== "completed" && incompleteSubtasks > 0;
     const card = createDiv({
@@ -809,7 +817,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       this.renderCollapsedTaskCard(card, task, incompleteSubtasks, taskSequence);
       card.addEventListener("click", (event) => {
         if (event.target.closest("button, input, .atb-clickable-chip")) return;
-        this.expandedCardIds.add(task.id);
+        this.expandedCardIds.add(taskStateKey);
         card.replaceWith(this.renderTaskCard(task, taskSequence));
       });
       return card;
@@ -834,7 +842,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     (0, import_obsidian.setIcon)(collapseButton, "chevron-up");
     collapseButton.addEventListener("click", (event) => {
       event.stopPropagation();
-      this.expandedCardIds.delete(task.id);
+      this.expandedCardIds.delete(taskStateKey);
       card.replaceWith(this.renderTaskCard(task, taskSequence));
     });
     const editButton = top.createEl("button", { cls: "atb-card-edit" });
@@ -895,25 +903,12 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     if (task.completed) {
       chips.appendChild(createChip(`\u5B8C\u6210 ${(0, import_obsidian.moment)(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
     }
-    const preferredSubtaskIndex = this.selectedSubtaskIndexes.get(task.id);
+    const preferredSubtaskIndex = this.selectedSubtaskIndexes.get(taskStateKey);
     const currentSubtask = !isSubtasksExpanded ? getCurrentSubtaskSummary(task.subtasks, preferredSubtaskIndex) : null;
     if (currentSubtask) {
       const summary = card.createDiv({
         cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
         attr: { title: `\u5B50\u4EFB\u52A1 ${currentSubtask.index + 1}/${currentSubtask.totalCount}\uFF1A${currentSubtask.text}` }
-      });
-      const navigation = summary.createDiv({ cls: "atb-current-subtask-navigation" });
-      const previousButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
-      previousButton.setAttribute("aria-label", "\u4E0A\u4E00\u6761\u5B50\u4EFB\u52A1");
-      previousButton.setAttribute("title", "\u4E0A\u4E00\u6761\u5B50\u4EFB\u52A1");
-      previousButton.disabled = currentSubtask.index === 0;
-      (0, import_obsidian.setIcon)(previousButton, "chevron-left");
-      previousButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const previousIndex = getAdjacentSubtaskIndex(currentSubtask.index, -1, currentSubtask.totalCount);
-        if (previousIndex === currentSubtask.index) return;
-        this.selectedSubtaskIndexes.set(task.id, previousIndex);
-        card.replaceWith(this.renderTaskCard(task, taskSequence));
       });
       const summaryBox = summary.createEl("input", { type: "checkbox" });
       summaryBox.addClass("atb-current-subtask-box");
@@ -928,6 +923,19 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       });
       summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
       summary.createDiv({ cls: "atb-current-subtask-position", text: `${currentSubtask.index + 1}/${currentSubtask.totalCount}` });
+      const navigation = summary.createDiv({ cls: "atb-current-subtask-navigation" });
+      const previousButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
+      previousButton.setAttribute("aria-label", "\u4E0A\u4E00\u6761\u5B50\u4EFB\u52A1");
+      previousButton.setAttribute("title", "\u4E0A\u4E00\u6761\u5B50\u4EFB\u52A1");
+      previousButton.disabled = currentSubtask.index === 0;
+      (0, import_obsidian.setIcon)(previousButton, "chevron-left");
+      previousButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const previousIndex = getAdjacentSubtaskIndex(currentSubtask.index, -1, currentSubtask.totalCount);
+        if (previousIndex === currentSubtask.index) return;
+        this.selectedSubtaskIndexes.set(taskStateKey, previousIndex);
+        card.replaceWith(this.renderTaskCard(task, taskSequence));
+      });
       const nextButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
       nextButton.setAttribute("aria-label", "\u4E0B\u4E00\u6761\u5B50\u4EFB\u52A1");
       nextButton.setAttribute("title", "\u4E0B\u4E00\u6761\u5B50\u4EFB\u52A1");
@@ -937,7 +945,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
         event.stopPropagation();
         const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, 1, currentSubtask.totalCount);
         if (nextIndex === currentSubtask.index) return;
-        this.selectedSubtaskIndexes.set(task.id, nextIndex);
+        this.selectedSubtaskIndexes.set(taskStateKey, nextIndex);
         card.replaceWith(this.renderTaskCard(task, taskSequence));
       });
     }
@@ -957,8 +965,8 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       subtaskIndicator.setAttribute("title", isSubtasksExpanded ? "\u6536\u8D77\u5B50\u4EFB\u52A1" : "\u5C55\u5F00\u5B50\u4EFB\u52A1");
       subtaskIndicator.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (this.expandedSubtaskIds.has(task.id)) this.expandedSubtaskIds.delete(task.id);
-        else this.expandedSubtaskIds.add(task.id);
+        if (this.expandedSubtaskIds.has(taskStateKey)) this.expandedSubtaskIds.delete(taskStateKey);
+        else this.expandedSubtaskIds.add(taskStateKey);
         card.replaceWith(this.renderTaskCard(task, taskSequence));
       });
     }
@@ -969,8 +977,8 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     linkIndicator.setAttribute("title", isAttachmentsExpanded ? "\u6536\u8D77\u9644\u4EF6" : "\u5C55\u5F00\u9644\u4EF6");
     linkIndicator.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (this.expandedAttachmentIds.has(task.id)) this.expandedAttachmentIds.delete(task.id);
-      else this.expandedAttachmentIds.add(task.id);
+      if (this.expandedAttachmentIds.has(taskStateKey)) this.expandedAttachmentIds.delete(taskStateKey);
+      else this.expandedAttachmentIds.add(taskStateKey);
       card.replaceWith(this.renderTaskCard(task, taskSequence));
     });
     if (isSubtasksExpanded) this.renderSubtaskDetails(card, task);

@@ -7,7 +7,8 @@
 - Added Beijing-time `#YYYYMMDD` task dates and today/overdue filters.
 - Added subtask collaborator mentions and made collapsed subtask completion reversible.
 - Made task cards start as numbered compact one-line summaries with click-to-expand details.
-- Added previous/next buttons for browsing subtasks in expanded cards.
+- Added previous/next buttons to the right of the subtask description for browsing subtasks in expanded cards.
+- Preserved expanded cards, attachment panels, subtask panels, and selected subtasks when task line numbers shift after creating a task.
 
 ## 0.3.0
 
