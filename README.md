@@ -21,7 +21,7 @@ The plugin scans Markdown tasks from configured files, classifies tasks by tags,
 - Add a Beijing-time task date with `#YYYYMMDD`, then filter the board to today's or overdue tasks.
 - Subtasks also support `@person`; only the current unfinished subtask's mentions contribute to the task card and collaborator filter. After it is completed, the next unfinished subtask's mentions become active. Mentions are preserved when editing the parent task.
 - Subtask checkboxes can be checked or unchecked from both the summary and expanded views.
-- In an expanded card, use the previous/next buttons in the current-subtask row to browse subtasks.
+- In an expanded card, use the previous/next buttons in the current-subtask row to browse subtasks. Checking the displayed subtask automatically advances to the next one.
 
 ## Install With BRAT
 

@@ -38,6 +38,10 @@ function getAdjacentSubtaskIndex(currentIndex, direction, totalCount) {
   if (totalCount <= 0) return -1;
   return Math.max(0, Math.min(currentIndex + direction, totalCount - 1));
 }
+function getSubtaskIndexAfterToggle(currentIndex, completed, totalCount) {
+  if (!completed) return currentIndex;
+  return getAdjacentSubtaskIndex(currentIndex, 1, totalCount);
+}
 function getCurrentSubtaskSummary(subtasks, preferredIndex) {
   if (subtasks.length === 0) return null;
   const completedCount = subtasks.filter((subtask) => subtask.completed).length;
@@ -919,6 +923,10 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
         const subtask = task.subtasks[currentSubtask.index];
         if (!subtask || task.category === "completed") return;
         await this.plugin.toggleSubtask(task, subtask, summaryBox.checked);
+        this.selectedSubtaskIndexes.set(
+          taskStateKey,
+          getSubtaskIndexAfterToggle(currentSubtask.index, summaryBox.checked, currentSubtask.totalCount)
+        );
         await this.renderTasks();
       });
       summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });

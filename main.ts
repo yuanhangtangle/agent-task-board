@@ -13,7 +13,11 @@ import {
   moment
 } from "obsidian";
 import { setCheckboxCompletion, stripCompletionMetadata } from "./completionMetadata";
-import { getAdjacentSubtaskIndex, getCurrentSubtaskSummary } from "./subtaskSummary";
+import {
+  getAdjacentSubtaskIndex,
+  getCurrentSubtaskSummary,
+  getSubtaskIndexAfterToggle
+} from "./subtaskSummary";
 import { getTaskViewStateKey } from "./taskViewState";
 import {
   formatTaskDateKey,
@@ -1008,6 +1012,10 @@ class AgentTaskBoardView extends ItemView {
         const subtask = task.subtasks[currentSubtask.index];
         if (!subtask || task.category === "completed") return;
         await this.plugin.toggleSubtask(task, subtask, summaryBox.checked);
+        this.selectedSubtaskIndexes.set(
+          taskStateKey,
+          getSubtaskIndexAfterToggle(currentSubtask.index, summaryBox.checked, currentSubtask.totalCount)
+        );
         await this.renderTasks();
       });
       summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });

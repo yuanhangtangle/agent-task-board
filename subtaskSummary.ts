@@ -16,6 +16,11 @@ export function getAdjacentSubtaskIndex(currentIndex: number, direction: -1 | 1,
   return Math.max(0, Math.min(currentIndex + direction, totalCount - 1));
 }
 
+export function getSubtaskIndexAfterToggle(currentIndex: number, completed: boolean, totalCount: number): number {
+  if (!completed) return currentIndex;
+  return getAdjacentSubtaskIndex(currentIndex, 1, totalCount);
+}
+
 export function getCurrentSubtaskSummary(subtasks: SubtaskSummaryInput[], preferredIndex?: number): CurrentSubtaskSummary | null {
   if (subtasks.length === 0) return null;
 
