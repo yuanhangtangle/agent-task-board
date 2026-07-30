@@ -674,7 +674,6 @@ class AgentTaskBoardView extends ItemView {
   private expandedAttachmentIds = new Set<string>();
   private expandedSubtaskIds = new Set<string>();
   private selectedSubtaskIndexes = new Map<string, number>();
-  private lastSubtaskWheelAt = new Map<string, number>();
 
   constructor(leaf: WorkspaceLeaf, plugin: AgentTaskBoardPlugin) {
     super(leaf);
@@ -720,9 +719,10 @@ class AgentTaskBoardView extends ItemView {
     for (const task of [...tasks, ...completedTasks]) {
       const panel = panels[task.category];
       if (!panel) continue;
-      counters[task.category]++;
+      const taskSequence = counters[task.category] + 1;
+      counters[task.category] = taskSequence;
       tasksByCategory[task.category].push(task);
-      panel.list.appendChild(this.renderTaskCard(task));
+      panel.list.appendChild(this.renderTaskCard(task, taskSequence));
     }
     for (const panel of layout) panels[panel.category]?.countEl.setText(String(counters[panel.category]));
 
@@ -801,7 +801,7 @@ class AgentTaskBoardView extends ItemView {
     return { el: panel, list, countEl };
   }
 
-  private renderTaskCard(task: TaskItem): HTMLElement {
+  private renderTaskCard(task: TaskItem, taskSequence: number): HTMLElement {
     const tooltipParts = [
       task.file.path,
       `行 ${task.line + 1}`,
@@ -895,16 +895,17 @@ class AgentTaskBoardView extends ItemView {
     });
 
     if (!isCardExpanded) {
-      this.renderCollapsedTaskCard(card, task, incompleteSubtasks);
+      this.renderCollapsedTaskCard(card, task, incompleteSubtasks, taskSequence);
       card.addEventListener("click", (event) => {
         if ((event.target as HTMLElement).closest("button, input, .atb-clickable-chip")) return;
         this.expandedCardIds.add(task.id);
-        card.replaceWith(this.renderTaskCard(task));
+        card.replaceWith(this.renderTaskCard(task, taskSequence));
       });
       return card;
     }
 
     const top = card.createDiv({ cls: "atb-card-top" });
+    top.createSpan({ cls: "atb-task-sequence", text: `${taskSequence}.` });
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
     checkbox.checked = task.category === "completed";
@@ -925,7 +926,7 @@ class AgentTaskBoardView extends ItemView {
     collapseButton.addEventListener("click", (event) => {
       event.stopPropagation();
       this.expandedCardIds.delete(task.id);
-      card.replaceWith(this.renderTaskCard(task));
+      card.replaceWith(this.renderTaskCard(task, taskSequence));
     });
     const editButton = top.createEl("button", { cls: "atb-card-edit" });
     editButton.setAttribute("aria-label", "编辑任务");
@@ -994,25 +995,22 @@ class AgentTaskBoardView extends ItemView {
     if (currentSubtask) {
       const summary = card.createDiv({
         cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
-        attr: { title: `子任务 ${currentSubtask.index + 1}/${currentSubtask.totalCount}：${currentSubtask.text}；滚轮切换上一条/下一条` }
+        attr: { title: `子任务 ${currentSubtask.index + 1}/${currentSubtask.totalCount}：${currentSubtask.text}` }
       });
-      summary.addEventListener("wheel", (event: WheelEvent) => {
-        if (currentSubtask.totalCount < 2 || Math.abs(event.deltaY) < 1) return;
-        const direction = event.deltaY > 0 ? 1 : -1;
-        const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, direction, currentSubtask.totalCount);
-        if (nextIndex === currentSubtask.index) return;
-
-        event.preventDefault();
+      const navigation = summary.createDiv({ cls: "atb-current-subtask-navigation" });
+      const previousButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
+      previousButton.setAttribute("aria-label", "上一条子任务");
+      previousButton.setAttribute("title", "上一条子任务");
+      previousButton.disabled = currentSubtask.index === 0;
+      setIcon(previousButton, "chevron-left");
+      previousButton.addEventListener("click", (event) => {
         event.stopPropagation();
+        const previousIndex = getAdjacentSubtaskIndex(currentSubtask.index, -1, currentSubtask.totalCount);
+        if (previousIndex === currentSubtask.index) return;
+        this.selectedSubtaskIndexes.set(task.id, previousIndex);
+        card.replaceWith(this.renderTaskCard(task, taskSequence));
+      });
 
-        const now = Date.now();
-        const lastWheelAt = this.lastSubtaskWheelAt.get(task.id) ?? 0;
-        if (now - lastWheelAt < 140) return;
-        this.lastSubtaskWheelAt.set(task.id, now);
-
-        this.selectedSubtaskIndexes.set(task.id, nextIndex);
-        card.replaceWith(this.renderTaskCard(task));
-      }, { passive: false });
       const summaryBox = summary.createEl("input", { type: "checkbox" });
       summaryBox.addClass("atb-current-subtask-box");
       summaryBox.checked = currentSubtask.completed;
@@ -1026,6 +1024,18 @@ class AgentTaskBoardView extends ItemView {
       });
       summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
       summary.createDiv({ cls: "atb-current-subtask-position", text: `${currentSubtask.index + 1}/${currentSubtask.totalCount}` });
+      const nextButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
+      nextButton.setAttribute("aria-label", "下一条子任务");
+      nextButton.setAttribute("title", "下一条子任务");
+      nextButton.disabled = currentSubtask.index === currentSubtask.totalCount - 1;
+      setIcon(nextButton, "chevron-right");
+      nextButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, 1, currentSubtask.totalCount);
+        if (nextIndex === currentSubtask.index) return;
+        this.selectedSubtaskIndexes.set(task.id, nextIndex);
+        card.replaceWith(this.renderTaskCard(task, taskSequence));
+      });
     }
 
     const footer = card.createDiv({ cls: "atb-card-footer" });
@@ -1047,7 +1057,7 @@ class AgentTaskBoardView extends ItemView {
         event.stopPropagation();
         if (this.expandedSubtaskIds.has(task.id)) this.expandedSubtaskIds.delete(task.id);
         else this.expandedSubtaskIds.add(task.id);
-        card.replaceWith(this.renderTaskCard(task));
+        card.replaceWith(this.renderTaskCard(task, taskSequence));
       });
     }
 
@@ -1060,7 +1070,7 @@ class AgentTaskBoardView extends ItemView {
       event.stopPropagation();
       if (this.expandedAttachmentIds.has(task.id)) this.expandedAttachmentIds.delete(task.id);
       else this.expandedAttachmentIds.add(task.id);
-      card.replaceWith(this.renderTaskCard(task));
+      card.replaceWith(this.renderTaskCard(task, taskSequence));
     });
 
     if (isSubtasksExpanded) this.renderSubtaskDetails(card, task);
@@ -1068,8 +1078,9 @@ class AgentTaskBoardView extends ItemView {
     return card;
   }
 
-  private renderCollapsedTaskCard(card: HTMLElement, task: TaskItem, incompleteSubtasks: number) {
+  private renderCollapsedTaskCard(card: HTMLElement, task: TaskItem, incompleteSubtasks: number, taskSequence: number) {
     const row = card.createDiv({ cls: "atb-collapsed-row" });
+    row.createSpan({ cls: "atb-task-sequence", text: `${taskSequence}.` });
     row.createDiv({ cls: "atb-collapsed-title", text: task.text });
 
     if (task.collaborators.length > 0) {

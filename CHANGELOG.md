@@ -6,8 +6,8 @@
 - Added the `#review` category for acceptance work.
 - Added Beijing-time `#YYYYMMDD` task dates and today/overdue filters.
 - Added subtask collaborator mentions and made collapsed subtask completion reversible.
-- Made task cards start as compact one-line summaries with click-to-expand details.
-- Added mouse-wheel browsing across previous and next subtasks in expanded cards.
+- Made task cards start as numbered compact one-line summaries with click-to-expand details.
+- Added previous/next buttons for browsing subtasks in expanded cards.
 
 ## 0.3.0
 

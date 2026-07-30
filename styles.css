@@ -368,6 +368,18 @@
   min-height: 20px;
 }
 
+.atb-task-sequence {
+  flex: 0 0 auto;
+  min-width: 16px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .atb-collapsed-title {
   flex: 1 1 auto;
   min-width: 48px;
@@ -578,6 +590,43 @@
 .atb-current-subtask-box {
   flex: 0 0 auto;
   margin-top: 1px;
+}
+
+.atb-current-subtask-navigation {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  align-items: center;
+}
+
+.atb-subtask-nav-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.atb-subtask-nav-button:hover:not(:disabled) {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+.atb-subtask-nav-button:disabled {
+  opacity: .35;
+  cursor: default;
+}
+
+.atb-subtask-nav-button svg {
+  width: 12px;
+  height: 12px;
 }
 
 .atb-current-subtask-title {

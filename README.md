@@ -14,14 +14,14 @@ The plugin scans Markdown tasks from configured files, classifies tasks by tags,
 - Quick task creation into a configured inbox file.
 - Edit and delete tasks from the board.
 - Drag tasks within a column or across columns; task order is written back to Markdown.
-- Task cards start as compact one-line summaries showing only the title, active `@person` mentions, and subtask progress; click a card to expand its full details.
+- Task cards start as compact one-line summaries showing an automatically generated per-column sequence number, the title, active `@person` mentions, and subtask progress; click a card to expand its full details.
 - Complete tasks into a separate done file, including indented child lines.
 - Attachment-style child lines under tasks, with URL extraction and link buttons.
 - Filter by `#tag` and `@person`.
 - Add a Beijing-time task date with `#YYYYMMDD`, then filter the board to today's or overdue tasks.
 - Subtasks also support `@person`; only the current unfinished subtask's mentions contribute to the task card and collaborator filter. After it is completed, the next unfinished subtask's mentions become active. Mentions are preserved when editing the parent task.
 - Subtask checkboxes can be checked or unchecked from both the summary and expanded views.
-- In an expanded card, place the pointer over the current-subtask row and scroll the mouse wheel up or down to browse the previous or next subtask.
+- In an expanded card, use the previous/next buttons in the current-subtask row to browse subtasks.
 
 ## Install With BRAT
 
