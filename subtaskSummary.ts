@@ -11,12 +11,20 @@ export interface CurrentSubtaskSummary {
   totalCount: number;
 }
 
-export function getCurrentSubtaskSummary(subtasks: SubtaskSummaryInput[]): CurrentSubtaskSummary | null {
+export function getAdjacentSubtaskIndex(currentIndex: number, direction: -1 | 1, totalCount: number): number {
+  if (totalCount <= 0) return -1;
+  return Math.max(0, Math.min(currentIndex + direction, totalCount - 1));
+}
+
+export function getCurrentSubtaskSummary(subtasks: SubtaskSummaryInput[], preferredIndex?: number): CurrentSubtaskSummary | null {
   if (subtasks.length === 0) return null;
 
   const completedCount = subtasks.filter((subtask) => subtask.completed).length;
   const incompleteIndex = subtasks.findIndex((subtask) => !subtask.completed);
-  const currentIndex = incompleteIndex >= 0 ? incompleteIndex : subtasks.length - 1;
+  const defaultIndex = incompleteIndex >= 0 ? incompleteIndex : subtasks.length - 1;
+  const currentIndex = preferredIndex === undefined
+    ? defaultIndex
+    : Math.max(0, Math.min(preferredIndex, subtasks.length - 1));
   const current = subtasks[currentIndex];
 
   return {

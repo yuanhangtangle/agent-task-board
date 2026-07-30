@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Added the default `做 / 推 / 收` and `Agent / 队列 / 任务池` workflow, with a settings toggle for the legacy board.
+- Added the `#review` category for acceptance work.
+- Added Beijing-time `#YYYYMMDD` task dates and today/overdue filters.
+- Added subtask collaborator mentions and made collapsed subtask completion reversible.
+- Made task cards start as compact one-line summaries with click-to-expand details.
+- Added mouse-wheel browsing across previous and next subtasks in expanded cards.
+
 ## 0.3.0
 
 - Added collaboration tasks via `#collab`.

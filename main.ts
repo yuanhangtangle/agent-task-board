@@ -13,23 +13,33 @@ import {
   moment
 } from "obsidian";
 import { setCheckboxCompletion, stripCompletionMetadata } from "./completionMetadata";
-import { getCurrentSubtaskSummary } from "./subtaskSummary";
+import { getAdjacentSubtaskIndex, getCurrentSubtaskSummary } from "./subtaskSummary";
+import {
+  formatTaskDateKey,
+  getBeijingDateKey,
+  getTaskDateTag,
+  matchesTaskDateFilter,
+  type TaskDateFilter
+} from "./taskDate";
 
 const VIEW_TYPE_AGENT_TASK_BOARD = "agent-task-board-view";
 
-type Category = "foreground" | "agent" | "collab" | "inqueue" | "pool";
+type Category = "foreground" | "agent" | "collab" | "review" | "inqueue" | "pool";
 type BoardCategory = Category | "completed";
 type FilterMode = "AND" | "OR";
 type CompletedFilter = "today" | "7d" | "30d" | "all";
 type InsertPosition = "before" | "after" | "end";
+type CategoryTagMap = Record<Exclude<Category, "pool">, string>;
 
 interface AgentTaskBoardSettings {
   scanPathPatterns: string[];
   inboxFile: string;
   completedTaskFile: string;
+  useModernWorkflow: boolean;
   foregroundTag: string;
   agentTag: string;
   collabTag: string;
+  reviewTag: string;
   inqueueTag: string;
   dateFormat: string;
   density: "comfortable" | "compact";
@@ -42,9 +52,11 @@ const DEFAULT_SETTINGS: AgentTaskBoardSettings = {
   scanPathPatterns: ["Inbox.md", "Tasks/.*\\.md", "Projects/.*\\.md"],
   inboxFile: "Tasks/Inbox.md",
   completedTaskFile: "Tasks/Done.md",
+  useModernWorkflow: true,
   foregroundTag: "#foreground",
   agentTag: "#agent",
   collabTag: "#collab",
+  reviewTag: "#review",
   inqueueTag: "#inqueue",
   dateFormat: "YYYY-MM-DD",
   density: "compact",
@@ -54,6 +66,7 @@ const DEFAULT_SETTINGS: AgentTaskBoardSettings = {
     foreground: [],
     agent: [],
     collab: [],
+    review: [],
     inqueue: [],
     pool: []
   }
@@ -76,12 +89,14 @@ interface TaskItem {
   due?: Date;
   start?: Date;
   completed?: Date;
+  taskDate?: string;
   originalLine: string;
   originalBlock: string[];
 }
 
 interface SubtaskItem {
   text: string;
+  collaborators: string[];
   completed: boolean;
   lineOffset: number;
   originalLine: string;
@@ -116,16 +131,27 @@ interface TaskLink {
   type: "url" | "file" | "remote";
 }
 
-const CATEGORY_LABELS: Record<BoardCategory, string> = {
+const MODERN_CATEGORY_LABELS: Record<BoardCategory, string> = {
+  foreground: "做",
+  collab: "推",
+  review: "收",
+  agent: "Agent",
+  inqueue: "队列",
+  pool: "任务池",
+  completed: "已完成"
+};
+
+const LEGACY_CATEGORY_LABELS: Record<BoardCategory, string> = {
   foreground: "前台任务",
   agent: "Agent 任务",
   collab: "协作任务",
+  review: "协作任务",
   inqueue: "入队任务",
   pool: "任务池",
   completed: "已完成"
 };
 
-const ACTIVE_CATEGORIES: Category[] = ["foreground", "agent", "collab", "inqueue", "pool"];
+const ACTIVE_CATEGORIES: Category[] = ["foreground", "agent", "collab", "review", "inqueue", "pool"];
 const FOCUS_PLANNER_TASK_MIME = "application/x-focus-planner-task";
 
 export default class AgentTaskBoardPlugin extends Plugin {
@@ -182,13 +208,18 @@ export default class AgentTaskBoardPlugin extends Plugin {
     this.refreshView();
   }
 
-  getCategoryTags(): Record<Exclude<Category, "pool">, string> {
+  getCategoryTags(): CategoryTagMap {
     return {
       foreground: prefixHash(this.settings.foregroundTag),
       agent: prefixHash(this.settings.agentTag),
       collab: prefixHash(this.settings.collabTag),
+      review: prefixHash(this.settings.reviewTag),
       inqueue: prefixHash(this.settings.inqueueTag)
     };
+  }
+
+  getCategoryLabel(category: BoardCategory): string {
+    return (this.settings.useModernWorkflow ? MODERN_CATEGORY_LABELS : LEGACY_CATEGORY_LABELS)[category];
   }
 
   async collectTasks(): Promise<TaskItem[]> {
@@ -215,11 +246,12 @@ export default class AgentTaskBoardPlugin extends Plugin {
         const originalBlock = lines.slice(i, blockRange.end + 1);
         const { subtasks, attachmentLines } = splitTaskBlockChildren(originalBlock);
         const tags = extractTags(raw);
-        const collaborators = extractCollaborators(raw);
-        const category = classifyTask(raw, categoryTags);
+        const collaborators = mergeCollaborators(extractCollaborators(raw), getActiveSubtask(subtasks)?.collaborators ?? []);
+        const category = classifyTask(raw, categoryTags, this.settings.useModernWorkflow);
         const created = extractDate(raw, "created", ["📋"]);
         const start = extractDate(raw, "start", ["🛫", "⏳"]);
         const due = extractDate(raw, "due", ["📅"]);
+        const taskDate = getTaskDateTag(tags);
         const text = cleanupTaskText(raw);
 
         if (!text) continue;
@@ -239,6 +271,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
           created: created ?? undefined,
           start: start ?? undefined,
           due: due ?? undefined,
+          taskDate,
           originalLine: line,
           originalBlock
         });
@@ -276,6 +309,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
       const created = extractDate(raw, "created", ["📋"]);
       const start = extractDate(raw, "start", ["🛫", "⏳"]);
       const due = extractDate(raw, "due", ["📅"]);
+      const taskDate = getTaskDateTag(tags);
       const text = cleanupTaskText(stripCompletionMetadata(raw));
 
       if (!text) continue;
@@ -296,6 +330,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
         start: start ?? undefined,
         due: due ?? undefined,
         completed: completed ?? undefined,
+        taskDate,
         originalLine: line,
         originalBlock
       });
@@ -390,7 +425,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
   }
 
   async toggleSubtask(task: TaskItem, subtask: SubtaskItem, completed: boolean) {
-    const today = moment().format(this.settings.dateFormat);
+    const today = getFormattedBeijingDate(this.settings.dateFormat);
     await this.app.vault.process(task.file, (data) => {
       const lines = data.split(/\r?\n/);
       const idx = findCurrentTaskLine(lines, task);
@@ -417,7 +452,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
       return;
     }
 
-    const today = moment().format(this.settings.dateFormat);
+    const today = getFormattedBeijingDate(this.settings.dateFormat);
     const completedBlock = [...task.originalBlock];
     completedBlock[0] = `${setCheckboxCompletion(completedBlock[0], true, today)} <!-- from: ${task.file.path}:${task.line + 1} -->`;
 
@@ -437,7 +472,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     const categoryTags = this.getCategoryTags();
     await this.transformTaskLine(task, (line) => setCategoryTag(line, category, categoryTags));
     this.refreshView();
-    new Notice(`已移动到${CATEGORY_LABELS[category]}`);
+    new Notice(`已移动到${this.getCategoryLabel(category)}`);
   }
 
   async moveTask(task: TaskItem, category: Category, targetId: string | null, position: InsertPosition) {
@@ -447,7 +482,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     }
     this.setOrderPosition(task.id, category, targetId, position);
     await this.saveSettings();
-    new Notice(`已移动到${CATEGORY_LABELS[category]}`);
+    new Notice(`已移动到${this.getCategoryLabel(category)}`);
   }
 
   async moveTaskLine(task: TaskItem, category: Category, targetTask: TaskItem | null, position: InsertPosition) {
@@ -467,12 +502,12 @@ export default class AgentTaskBoardPlugin extends Plugin {
         await this.removeTaskBlock(task);
         await this.app.vault.process(inboxFile, (data) => appendBlock(data, nextBlock));
         this.refreshView();
-        new Notice(`已恢复到${CATEGORY_LABELS[category]}`);
+        new Notice(`已恢复到${this.getCategoryLabel(category)}`);
         return;
       }
       await this.replaceTaskBlock(task, rewriteBlock(task.originalBlock));
       this.refreshView();
-      new Notice(`已移动到${CATEGORY_LABELS[category]}`);
+      new Notice(`已移动到${this.getCategoryLabel(category)}`);
       return;
     }
 
@@ -531,7 +566,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
     }
 
     this.refreshView();
-    new Notice(`已移动到${CATEGORY_LABELS[category]}`);
+    new Notice(`已移动到${this.getCategoryLabel(category)}`);
   }
 
   syncTaskOrder(tasks: TaskItem[]) {
@@ -633,9 +668,13 @@ class AgentTaskBoardView extends ItemView {
   private filterCollabs: string[] = [];
   private excludeCollabs: string[] = [];
   private filterMode: FilterMode = "AND";
+  private taskDateFilter: TaskDateFilter = "all";
   private completedFilter: CompletedFilter = "7d";
-  private expandedTaskIds = new Set<string>();
+  private expandedCardIds = new Set<string>();
+  private expandedAttachmentIds = new Set<string>();
   private expandedSubtaskIds = new Set<string>();
+  private selectedSubtaskIndexes = new Map<string, number>();
+  private lastSubtaskWheelAt = new Map<string, number>();
 
   constructor(leaf: WorkspaceLeaf, plugin: AgentTaskBoardPlugin) {
     super(leaf);
@@ -653,40 +692,43 @@ class AgentTaskBoardView extends ItemView {
     const root = this.containerEl;
     root.empty();
     root.toggleClass("atb-compact", this.plugin.settings.density === "compact");
+    root.toggleClass("atb-modern-workflow", this.plugin.settings.useModernWorkflow);
 
     const outer = root.createDiv({ cls: "atb-outer" });
     this.renderTopbar(outer);
 
     let tasks = await this.plugin.collectTasks();
-    let completedTasks = await this.plugin.collectCompletedTasks();
+    let completedTasks = this.plugin.settings.useModernWorkflow ? [] : await this.plugin.collectCompletedTasks();
     tasks.sort(compareTasks);
     completedTasks.sort(compareCompletedTasks);
 
     this.renderFilterToolbar(outer, [...tasks, ...completedTasks]);
-    tasks = this.applyFilters(tasks);
-    completedTasks = this.applyCompletedFilter(this.applyFilters(completedTasks));
+    tasks = this.applyTaskDateFilter(this.applyFilters(tasks));
+    completedTasks = this.taskDateFilter === "all"
+      ? this.applyCompletedFilter(this.applyFilters(completedTasks))
+      : [];
 
     const grid = outer.createDiv({ cls: "atb-board" });
-    const panels: Record<BoardCategory, { el: HTMLElement; list: HTMLElement; countEl: HTMLElement }> = {
-      foreground: this.createPanel(grid, "前台任务", "atb-q-foreground", "foreground"),
-      agent: this.createPanel(grid, "Agent 任务", "atb-q-agent", "agent"),
-      collab: this.createPanel(grid, "协作任务", "atb-q-collab", "collab"),
-      inqueue: this.createPanel(grid, "入队任务", "atb-q-inqueue", "inqueue"),
-      pool: this.createPanel(grid, "任务池", "atb-q-pool", "pool"),
-      completed: this.createPanel(grid, "已完成", "atb-q-completed")
-    };
+    const layout = getBoardLayout(this.plugin.settings.useModernWorkflow);
+    const panels: Partial<Record<BoardCategory, { el: HTMLElement; list: HTMLElement; countEl: HTMLElement }>> = {};
+    for (const panel of layout) {
+      panels[panel.category] = this.createPanel(grid, panel.title, panel.cls, panel.category === "completed" ? undefined : panel.category);
+    }
 
-    const counters: Record<BoardCategory, number> = { foreground: 0, agent: 0, collab: 0, inqueue: 0, pool: 0, completed: 0 };
-    const tasksByCategory: Record<BoardCategory, TaskItem[]> = { foreground: [], agent: [], collab: [], inqueue: [], pool: [], completed: [] };
+    const counters: Record<BoardCategory, number> = { foreground: 0, agent: 0, collab: 0, review: 0, inqueue: 0, pool: 0, completed: 0 };
+    const tasksByCategory: Record<BoardCategory, TaskItem[]> = { foreground: [], agent: [], collab: [], review: [], inqueue: [], pool: [], completed: [] };
     for (const task of [...tasks, ...completedTasks]) {
+      const panel = panels[task.category];
+      if (!panel) continue;
       counters[task.category]++;
       tasksByCategory[task.category].push(task);
-      panels[task.category].list.appendChild(this.renderTaskCard(task));
+      panel.list.appendChild(this.renderTaskCard(task));
     }
-    (Object.keys(panels) as BoardCategory[]).forEach((category) => panels[category].countEl.setText(String(counters[category])));
+    for (const panel of layout) panels[panel.category]?.countEl.setText(String(counters[panel.category]));
 
-    for (const category of ["foreground", "agent", "collab", "inqueue", "pool"] as Category[]) {
+    for (const category of layout.map((panel) => panel.category).filter(isActiveCategory)) {
       const panel = panels[category];
+      if (!panel) continue;
       panel.list.addEventListener("dragover", (ev: DragEvent) => {
         if ((ev.target as HTMLElement).closest(".atb-card")) return;
         ev.preventDefault();
@@ -764,15 +806,20 @@ class AgentTaskBoardView extends ItemView {
       task.file.path,
       `行 ${task.line + 1}`,
       task.due ? `截止 ${moment(task.due).format(this.plugin.settings.dateFormat)}` : "",
+      task.taskDate ? `任务日期 ${formatTaskDateKey(task.taskDate)}（北京时间）` : "",
       task.completed ? `完成 ${moment(task.completed).format(this.plugin.settings.dateFormat)}` : "",
       task.created ? `创建 ${moment(task.created).format(this.plugin.settings.dateFormat)}` : ""
     ].filter(Boolean);
 
-    const isExpanded = this.expandedTaskIds.has(task.id);
+    const isCardExpanded = this.expandedCardIds.has(task.id);
+    const isAttachmentsExpanded = this.expandedAttachmentIds.has(task.id);
     const isSubtasksExpanded = this.expandedSubtaskIds.has(task.id);
     const incompleteSubtasks = task.subtasks.filter((subtask) => !subtask.completed).length;
     const isCompletionBlocked = task.category !== "completed" && incompleteSubtasks > 0;
-    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded || isSubtasksExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" · ") } });
+    const card = createDiv({
+      cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isCardExpanded ? "is-expanded" : "is-collapsed"}`,
+      attr: { draggable: "true", title: [...tooltipParts, isCardExpanded ? "" : "点击展开"].filter(Boolean).join(" · ") }
+    });
     card.addEventListener("dragstart", (ev: DragEvent) => {
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
@@ -847,6 +894,16 @@ class AgentTaskBoardView extends ItemView {
       }
     });
 
+    if (!isCardExpanded) {
+      this.renderCollapsedTaskCard(card, task, incompleteSubtasks);
+      card.addEventListener("click", (event) => {
+        if ((event.target as HTMLElement).closest("button, input, .atb-clickable-chip")) return;
+        this.expandedCardIds.add(task.id);
+        card.replaceWith(this.renderTaskCard(task));
+      });
+      return card;
+    }
+
     const top = card.createDiv({ cls: "atb-card-top" });
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
@@ -861,6 +918,15 @@ class AgentTaskBoardView extends ItemView {
     });
 
     const title = top.createDiv({ cls: "atb-task-title", text: task.text });
+    const collapseButton = top.createEl("button", { cls: "atb-card-edit atb-card-collapse" });
+    collapseButton.setAttribute("aria-label", "折叠任务");
+    collapseButton.setAttribute("title", "折叠任务");
+    setIcon(collapseButton, "chevron-up");
+    collapseButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.expandedCardIds.delete(task.id);
+      card.replaceWith(this.renderTaskCard(task));
+    });
     const editButton = top.createEl("button", { cls: "atb-card-edit" });
     editButton.setAttribute("aria-label", "编辑任务");
     editButton.setAttribute("title", "编辑任务");
@@ -885,6 +951,7 @@ class AgentTaskBoardView extends ItemView {
     }
     if (task.tags.length > 0) {
       for (const tag of task.tags) {
+        if (tag === task.taskDate) continue;
         const chip = createChip(`#${tag}`, "atb-chip-tag");
         chip.setAttribute("data-tag-color", String(getTagColorIndex(tag)));
         chip.addClass("atb-clickable-chip");
@@ -895,6 +962,19 @@ class AgentTaskBoardView extends ItemView {
         });
         chips.appendChild(chip);
       }
+    }
+    if (task.taskDate) {
+      const today = getBeijingDateKey();
+      const state = task.taskDate === today ? "今天" : task.taskDate < today ? "逾期" : "";
+      const chip = createChip(`#${task.taskDate}${state ? ` · ${state}` : ""}`, "atb-chip-date");
+      if (task.taskDate < today) chip.addClass("atb-chip-danger");
+      chip.addClass("atb-clickable-chip");
+      chip.setAttribute("title", `北京时间任务日期 ${formatTaskDateKey(task.taskDate)}；点击筛选该日期`);
+      chip.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.addFilterValue(this.filterTags, task.taskDate!);
+      });
+      chips.appendChild(chip);
     }
     if (task.due) {
       const today = moment().startOf("day");
@@ -907,24 +987,45 @@ class AgentTaskBoardView extends ItemView {
       chips.appendChild(createChip(`完成 ${moment(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
     }
 
-    const currentSubtask = !isSubtasksExpanded ? getCurrentSubtaskSummary(task.subtasks) : null;
+    const preferredSubtaskIndex = this.selectedSubtaskIndexes.get(task.id);
+    const currentSubtask = !isSubtasksExpanded
+      ? getCurrentSubtaskSummary(task.subtasks, preferredSubtaskIndex)
+      : null;
     if (currentSubtask) {
       const summary = card.createDiv({
         cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
-        attr: { title: `当前子任务 ${currentSubtask.completedCount}/${currentSubtask.totalCount}: ${currentSubtask.text}` }
+        attr: { title: `子任务 ${currentSubtask.index + 1}/${currentSubtask.totalCount}：${currentSubtask.text}；滚轮切换上一条/下一条` }
       });
+      summary.addEventListener("wheel", (event: WheelEvent) => {
+        if (currentSubtask.totalCount < 2 || Math.abs(event.deltaY) < 1) return;
+        const direction = event.deltaY > 0 ? 1 : -1;
+        const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, direction, currentSubtask.totalCount);
+        if (nextIndex === currentSubtask.index) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const now = Date.now();
+        const lastWheelAt = this.lastSubtaskWheelAt.get(task.id) ?? 0;
+        if (now - lastWheelAt < 140) return;
+        this.lastSubtaskWheelAt.set(task.id, now);
+
+        this.selectedSubtaskIndexes.set(task.id, nextIndex);
+        card.replaceWith(this.renderTaskCard(task));
+      }, { passive: false });
       const summaryBox = summary.createEl("input", { type: "checkbox" });
       summaryBox.addClass("atb-current-subtask-box");
       summaryBox.checked = currentSubtask.completed;
-      summaryBox.disabled = task.category === "completed" || currentSubtask.completed;
+      summaryBox.disabled = task.category === "completed";
       summaryBox.addEventListener("click", (event) => event.stopPropagation());
       summaryBox.addEventListener("change", async () => {
         const subtask = task.subtasks[currentSubtask.index];
-        if (!subtask || subtask.completed || task.category === "completed") return;
-        await this.plugin.toggleSubtask(task, subtask, true);
+        if (!subtask || task.category === "completed") return;
+        await this.plugin.toggleSubtask(task, subtask, summaryBox.checked);
         await this.renderTasks();
       });
       summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
+      summary.createDiv({ cls: "atb-current-subtask-position", text: `${currentSubtask.index + 1}/${currentSubtask.totalCount}` });
     }
 
     const footer = card.createDiv({ cls: "atb-card-footer" });
@@ -946,7 +1047,7 @@ class AgentTaskBoardView extends ItemView {
         event.stopPropagation();
         if (this.expandedSubtaskIds.has(task.id)) this.expandedSubtaskIds.delete(task.id);
         else this.expandedSubtaskIds.add(task.id);
-        void this.renderTasks();
+        card.replaceWith(this.renderTaskCard(task));
       });
     }
 
@@ -954,17 +1055,45 @@ class AgentTaskBoardView extends ItemView {
       cls: `atb-link-indicator ${task.links.length === 0 ? "is-empty" : ""}`,
       text: `附件 ${task.links.length}`
     });
-    linkIndicator.setAttribute("title", isExpanded ? "收起附件" : "展开附件");
+    linkIndicator.setAttribute("title", isAttachmentsExpanded ? "收起附件" : "展开附件");
     linkIndicator.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (this.expandedTaskIds.has(task.id)) this.expandedTaskIds.delete(task.id);
-      else this.expandedTaskIds.add(task.id);
-      void this.renderTasks();
+      if (this.expandedAttachmentIds.has(task.id)) this.expandedAttachmentIds.delete(task.id);
+      else this.expandedAttachmentIds.add(task.id);
+      card.replaceWith(this.renderTaskCard(task));
     });
 
     if (isSubtasksExpanded) this.renderSubtaskDetails(card, task);
-    if (isExpanded) this.renderTaskDetails(card, task);
+    if (isAttachmentsExpanded) this.renderTaskDetails(card, task);
     return card;
+  }
+
+  private renderCollapsedTaskCard(card: HTMLElement, task: TaskItem, incompleteSubtasks: number) {
+    const row = card.createDiv({ cls: "atb-collapsed-row" });
+    row.createDiv({ cls: "atb-collapsed-title", text: task.text });
+
+    if (task.collaborators.length > 0) {
+      const mentions = row.createDiv({ cls: "atb-collapsed-mentions" });
+      for (const collaborator of task.collaborators) {
+        const chip = createChip(`@${collaborator}`, "atb-chip-collab");
+        chip.addClass("atb-clickable-chip");
+        chip.setAttribute("title", `筛选 @${collaborator}`);
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.addFilterValue(this.filterCollabs, collaborator);
+        });
+        mentions.appendChild(chip);
+      }
+    }
+
+    if (task.subtasks.length > 0) {
+      const completedSubtasks = task.subtasks.length - incompleteSubtasks;
+      const progress = row.createDiv({
+        cls: `atb-collapsed-progress ${incompleteSubtasks === 0 ? "is-complete" : ""}`,
+        text: `✅${completedSubtasks}/${task.subtasks.length}`
+      });
+      progress.setAttribute("title", `子任务完成 ${completedSubtasks}/${task.subtasks.length}`);
+    }
   }
 
   private renderSubtaskDetails(card: HTMLElement, task: TaskItem) {
@@ -982,6 +1111,19 @@ class AgentTaskBoardView extends ItemView {
       });
       const title = row.createDiv({ cls: "atb-subtask-title", text: subtask.text });
       title.toggleClass("is-complete", subtask.completed);
+      if (!subtask.completed && subtask.collaborators.length > 0) {
+        const mentions = row.createDiv({ cls: "atb-subtask-mentions" });
+        for (const collaborator of subtask.collaborators) {
+          const chip = createChip(`@${collaborator}`, "atb-chip-collab");
+          chip.addClass("atb-clickable-chip");
+          chip.setAttribute("title", `筛选 @${collaborator}`);
+          chip.addEventListener("click", (event) => {
+            event.stopPropagation();
+            this.addFilterValue(this.filterCollabs, collaborator);
+          });
+          mentions.appendChild(chip);
+        }
+      }
     }
   }
 
@@ -1026,7 +1168,11 @@ class AgentTaskBoardView extends ItemView {
     const collaborators = Array.from(new Set(allTasks.flatMap((task) => task.collaborators))).sort();
 
     const toolbar = container.createDiv({ cls: "atb-filter-toolbar" });
-    const activeFilters = this.filterTags.length + this.excludeTags.length + this.filterCollabs.length + this.excludeCollabs.length;
+    const activeFilters = this.filterTags.length
+      + this.excludeTags.length
+      + this.filterCollabs.length
+      + this.excludeCollabs.length
+      + (this.taskDateFilter === "all" ? 0 : 1);
 
     const modeSelect = toolbar.createEl("select", { cls: "atb-filter-mode" });
     modeSelect.createEl("option", { value: "AND", text: "过滤：AND" });
@@ -1043,27 +1189,43 @@ class AgentTaskBoardView extends ItemView {
     for (const collaborator of this.filterCollabs) this.renderFilterChip(toolbar, collaborator, "@", false, this.filterCollabs, this.excludeCollabs, "collab");
     for (const collaborator of this.excludeCollabs) this.renderFilterChip(toolbar, collaborator, "@", true, this.filterCollabs, this.excludeCollabs, "collab");
 
-    if (activeFilters >= 2) {
+    for (const option of [
+      { value: "today" as const, label: "当天任务" },
+      { value: "overdue" as const, label: "过期任务" }
+    ]) {
+      const button = toolbar.createEl("button", { cls: "atb-date-filter", text: option.label });
+      button.toggleClass("is-active", this.taskDateFilter === option.value);
+      button.setAttribute("title", `${option.label}（北京时间 ${formatTaskDateKey(getBeijingDateKey())}）`);
+      button.addEventListener("click", () => {
+        this.taskDateFilter = this.taskDateFilter === option.value ? "all" : option.value;
+        void this.renderTasks();
+      });
+    }
+
+    if (activeFilters > 0) {
       const clearButton = toolbar.createEl("button", { cls: "atb-clear-filter", text: "清除" });
       clearButton.addEventListener("click", () => {
         this.filterTags = [];
         this.excludeTags = [];
         this.filterCollabs = [];
         this.excludeCollabs = [];
+        this.taskDateFilter = "all";
         void this.renderTasks();
       });
     }
 
-    const completedSelect = toolbar.createEl("select", { cls: "atb-completed-filter" });
-    completedSelect.createEl("option", { value: "today", text: "完成：今天" });
-    completedSelect.createEl("option", { value: "7d", text: "完成：7天" });
-    completedSelect.createEl("option", { value: "30d", text: "完成：30天" });
-    completedSelect.createEl("option", { value: "all", text: "完成：全部" });
-    completedSelect.value = this.completedFilter;
-    completedSelect.addEventListener("change", () => {
-      this.completedFilter = completedSelect.value as CompletedFilter;
-      void this.renderTasks();
-    });
+    if (!this.plugin.settings.useModernWorkflow) {
+      const completedSelect = toolbar.createEl("select", { cls: "atb-completed-filter" });
+      completedSelect.createEl("option", { value: "today", text: "完成：今天" });
+      completedSelect.createEl("option", { value: "7d", text: "完成：7天" });
+      completedSelect.createEl("option", { value: "30d", text: "完成：30天" });
+      completedSelect.createEl("option", { value: "all", text: "完成：全部" });
+      completedSelect.value = this.completedFilter;
+      completedSelect.addEventListener("change", () => {
+        this.completedFilter = completedSelect.value as CompletedFilter;
+        void this.renderTasks();
+      });
+    }
 
     this.renderFilterInput(toolbar, tags, collaborators);
   }
@@ -1197,7 +1359,7 @@ class AgentTaskBoardView extends ItemView {
   private applyCompletedFilter(tasks: TaskItem[]) {
     if (this.completedFilter === "all") return tasks;
 
-    const now = moment().startOf("day");
+    const now = moment(getBeijingDateKey(), "YYYYMMDD", true).startOf("day");
     return tasks.filter((task) => {
       if (!task.completed) return this.completedFilter === "all";
       const completed = moment(task.completed).startOf("day");
@@ -1205,6 +1367,12 @@ class AgentTaskBoardView extends ItemView {
       const days = this.completedFilter === "7d" ? 7 : 30;
       return !completed.isBefore(now.clone().subtract(days - 1, "days"), "day");
     });
+  }
+
+  private applyTaskDateFilter(tasks: TaskItem[]) {
+    if (this.taskDateFilter === "all") return tasks;
+    const today = getBeijingDateKey();
+    return tasks.filter((task) => matchesTaskDateFilter(task.taskDate, this.taskDateFilter, today));
   }
 }
 
@@ -1254,10 +1422,10 @@ class CreateTaskModal extends Modal {
 
     new Setting(contentEl)
       .setName("标签")
-      .setDesc("空格分隔，支持写 #tag；分类标签由象限自动维护。")
+      .setDesc("空格分隔，支持写 #tag；#YYYYMMDD 表示北京时间任务日期，分类标签由面板自动维护。")
       .addText((text) => {
         text.setValue(this.tagText);
-        text.setPlaceholder("#today #important");
+        text.setPlaceholder("#20260730 #important");
         text.onChange((value) => this.tagText = value);
       });
 
@@ -1279,12 +1447,23 @@ class CreateTaskModal extends Modal {
     new Setting(contentEl)
       .setName("分类")
       .addDropdown((dropdown) => {
+        if (this.plugin.settings.useModernWorkflow) {
+          dropdown
+            .addOption("foreground", "做")
+            .addOption("collab", "推")
+            .addOption("review", "收")
+            .addOption("agent", "Agent")
+            .addOption("inqueue", "队列")
+            .addOption("pool", "任务池");
+        } else {
+          dropdown
+            .addOption("foreground", "前台任务")
+            .addOption("agent", "Agent 任务")
+            .addOption("collab", "协作任务")
+            .addOption("inqueue", "入队任务")
+            .addOption("pool", "任务池");
+        }
         dropdown
-          .addOption("foreground", "前台任务")
-          .addOption("agent", "Agent 任务")
-          .addOption("collab", "协作任务")
-          .addOption("inqueue", "入队任务")
-          .addOption("pool", "任务池")
           .setValue(this.category)
           .onChange((value: Category) => this.category = value);
       });
@@ -1355,10 +1534,10 @@ class EditTaskModal extends Modal {
 
     new Setting(contentEl)
       .setName("标签")
-      .setDesc("空格分隔，支持写 #tag；保存时替换任务里的普通标签。")
+      .setDesc("空格分隔，支持写 #tag；#YYYYMMDD 表示北京时间任务日期，保存时替换任务里的普通标签。")
       .addText((text) => {
         text.setValue(this.tagText);
-        text.setPlaceholder("#today #important");
+        text.setPlaceholder("#20260730 #important");
         text.onChange((value) => this.tagText = value);
       });
 
@@ -1412,6 +1591,17 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Agent Task Board 设置" });
+
+    new Setting(containerEl)
+      .setName("新版工作流：做 / 推 / 收")
+      .setDesc("开启后使用“做、推、收 / Agent、队列、任务池”六列；关闭后恢复旧版六列和已完成任务面板。")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.useModernWorkflow)
+        .onChange(async (value) => {
+          this.plugin.settings.useModernWorkflow = value;
+          await this.plugin.saveSettings();
+          this.display();
+        }));
 
     new Setting(containerEl)
       .setName("扫描路径正则")
@@ -1468,7 +1658,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("前台任务标签")
+      .setName(this.plugin.settings.useModernWorkflow ? "做任务标签" : "前台任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.foregroundTag)
         .onChange(async (value) => {
@@ -1486,7 +1676,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("协作任务标签")
+      .setName(this.plugin.settings.useModernWorkflow ? "推任务标签" : "协作任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.collabTag)
         .onChange(async (value) => {
@@ -1494,8 +1684,20 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
+    if (this.plugin.settings.useModernWorkflow) {
+      new Setting(containerEl)
+        .setName("收任务标签")
+        .setDesc("切回旧版工作流时，带此标签的任务会并入“协作任务”。")
+        .addText((text) => text
+          .setValue(this.plugin.settings.reviewTag)
+          .onChange(async (value) => {
+            this.plugin.settings.reviewTag = value.trim() || "#review";
+            await this.plugin.saveSettings();
+          }));
+    }
+
     new Setting(containerEl)
-      .setName("入队任务标签")
+      .setName(this.plugin.settings.useModernWorkflow ? "队列任务标签" : "入队任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.inqueueTag)
         .onChange(async (value) => {
@@ -1505,6 +1707,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("日期格式")
+      .setDesc("用于完成日期等显示；任务日期标签固定使用 #YYYYMMDD。")
       .addText((text) => text
         .setValue(this.plugin.settings.dateFormat)
         .onChange(async (value) => {
@@ -1525,7 +1728,9 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
 
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "分类冲突优先级固定为：#foreground > #agent > #collab > #inqueue > 无标签。拖拽会先移除四个分类标签，再写入目标分类标签。"
+      text: this.plugin.settings.useModernWorkflow
+        ? "新版分类优先级固定为：做 > 推 > 收 > Agent > 队列 > 任务池。拖拽会先移除所有分类标签，再写入目标分类标签。"
+        : "旧版分类优先级固定为：前台 > Agent > 协作（含新版“收”）> 入队 > 任务池。拖拽会先移除所有分类标签，再写入目标分类标签。"
     });
   }
 }
@@ -1539,6 +1744,32 @@ const STRICT_DATE_FORMATS = [
   "YYYY-MM-DDTHH:mm:ss"
 ];
 
+function getBoardLayout(useModernWorkflow: boolean): Array<{ category: BoardCategory; title: string; cls: string }> {
+  if (useModernWorkflow) {
+    return [
+      { category: "foreground", title: MODERN_CATEGORY_LABELS.foreground, cls: "atb-q-foreground" },
+      { category: "collab", title: MODERN_CATEGORY_LABELS.collab, cls: "atb-q-collab" },
+      { category: "review", title: MODERN_CATEGORY_LABELS.review, cls: "atb-q-review" },
+      { category: "agent", title: MODERN_CATEGORY_LABELS.agent, cls: "atb-q-agent" },
+      { category: "inqueue", title: MODERN_CATEGORY_LABELS.inqueue, cls: "atb-q-inqueue" },
+      { category: "pool", title: MODERN_CATEGORY_LABELS.pool, cls: "atb-q-pool" }
+    ];
+  }
+
+  return [
+    { category: "foreground", title: LEGACY_CATEGORY_LABELS.foreground, cls: "atb-q-foreground" },
+    { category: "agent", title: LEGACY_CATEGORY_LABELS.agent, cls: "atb-q-agent" },
+    { category: "collab", title: LEGACY_CATEGORY_LABELS.collab, cls: "atb-q-collab" },
+    { category: "inqueue", title: LEGACY_CATEGORY_LABELS.inqueue, cls: "atb-q-inqueue" },
+    { category: "pool", title: LEGACY_CATEGORY_LABELS.pool, cls: "atb-q-pool" },
+    { category: "completed", title: LEGACY_CATEGORY_LABELS.completed, cls: "atb-q-completed" }
+  ];
+}
+
+function getFormattedBeijingDate(format: string): string {
+  return moment(getBeijingDateKey(), "YYYYMMDD", true).format(format);
+}
+
 function compilePathMatchers(patterns: string[]): RegExp[] {
   return patterns.map((pattern) => {
     try {
@@ -1550,27 +1781,33 @@ function compilePathMatchers(patterns: string[]): RegExp[] {
   }).filter((re): re is RegExp => re !== null);
 }
 
-function classifyTask(raw: string, tags: Record<Exclude<Category, "pool">, string>): Category {
+function classifyTask(raw: string, tags: CategoryTagMap, useModernWorkflow: boolean): Category {
   if (containsTag(raw, tags.foreground)) return "foreground";
-  if (containsTag(raw, tags.agent)) return "agent";
-  if (containsTag(raw, tags.collab)) return "collab";
+  if (useModernWorkflow) {
+    if (containsTag(raw, tags.collab)) return "collab";
+    if (containsTag(raw, tags.review)) return "review";
+    if (containsTag(raw, tags.agent)) return "agent";
+  } else {
+    if (containsTag(raw, tags.agent)) return "agent";
+    if (containsTag(raw, tags.collab) || containsTag(raw, tags.review)) return "collab";
+  }
   if (containsTag(raw, tags.inqueue)) return "inqueue";
   return "pool";
 }
 
-function setCategoryTag(line: string, category: Category, tags: Record<Exclude<Category, "pool">, string>) {
+function setCategoryTag(line: string, category: Category, tags: CategoryTagMap) {
   let next = removeCategoryTags(line, tags);
   if (category !== "pool") next = `${next.trim()} ${tags[category]}`;
   return squashSpaces(next);
 }
 
-function buildTaskLine(text: string, category: Category, tags: Record<Exclude<Category, "pool">, string>) {
+function buildTaskLine(text: string, category: Category, tags: CategoryTagMap) {
   let line = text.replace(/^[-*]\s+\[[ xX]\]\s+/, "").trim();
   line = setCategoryTag(`- [ ] ${line}`, category, tags);
   return line;
 }
 
-function buildTaskHeaderLine(task: TaskItem, rawText: string, tags: Record<Exclude<Category, "pool">, string>) {
+function buildTaskHeaderLine(task: TaskItem, rawText: string, tags: CategoryTagMap) {
   if (task.category === "completed") {
     const prefix = /^(\s*[-*]\s+\[[xX]\]\s+)/.exec(task.originalLine)?.[1] ?? "- [x] ";
     return `${prefix}${rawText.trim()}`;
@@ -1665,7 +1902,12 @@ function normalizeSubtaskInput(value: string) {
 }
 
 function serializeSubtasksForEdit(subtasks: SubtaskItem[]) {
-  return subtasks.map((subtask) => `[${subtask.completed ? "x" : " "}] ${subtask.text}`).join("\n");
+  return subtasks
+    .map((subtask) => {
+      const collaborators = subtask.collaborators.map((collaborator) => `@${collaborator}`).join(" ");
+      return `[${subtask.completed ? "x" : " "}] ${[subtask.text, collaborators].filter(Boolean).join(" ")}`;
+    })
+    .join("\n");
 }
 
 function cleanupAttachmentLine(line: string) {
@@ -1691,10 +1933,15 @@ function parseSubtaskLine(line: string, lineOffset: number): SubtaskItem | null 
   if (!match) return null;
   return {
     text: cleanupTaskText(stripCompletionMetadata(match[3])),
+    collaborators: extractCollaborators(match[3]),
     completed: match[2].toLowerCase() === "x",
     lineOffset,
     originalLine: line
   };
+}
+
+function getActiveSubtask(subtasks: SubtaskItem[]): SubtaskItem | null {
+  return subtasks.find((subtask) => !subtask.completed) ?? null;
 }
 
 function addLocalFilePicker(container: HTMLElement, onSelect: (paths: string[]) => void) {
@@ -1816,6 +2063,7 @@ function normalizeTaskOrder(order: Partial<Record<Category, string[]>> | undefin
     foreground: Array.isArray(order?.foreground) ? order.foreground : [],
     agent: Array.isArray(order?.agent) ? order.agent : [],
     collab: Array.isArray(order?.collab) ? order.collab : [],
+    review: Array.isArray(order?.review) ? order.review : [],
     inqueue: Array.isArray(order?.inqueue) ? order.inqueue : [],
     pool: Array.isArray(order?.pool) ? order.pool : []
   };
@@ -1837,15 +2085,15 @@ function isActiveCategory(category: BoardCategory): category is Category {
   return category !== "completed";
 }
 
-function buildTaskId(filePath: string, line: number, raw: string, categoryTags: Record<Exclude<Category, "pool">, string>) {
+function buildTaskId(filePath: string, line: number, raw: string, categoryTags: CategoryTagMap) {
   const stableRaw = removeCategoryTags(raw, categoryTags)
     .replace(/\s{2,}/g, " ")
     .trim();
   return `${filePath}:${line + 1}:${hashString(stableRaw)}`;
 }
 
-function removeCategoryTags(line: string, tags: Record<Exclude<Category, "pool">, string>) {
-  return removeTag(removeTag(removeTag(removeTag(line, tags.foreground), tags.agent), tags.collab), tags.inqueue);
+function removeCategoryTags(line: string, tags: CategoryTagMap) {
+  return Object.values(tags).reduce((next, tag) => removeTag(next, tag), line);
 }
 
 function hashString(value: string) {
@@ -1880,7 +2128,7 @@ function applyTaskTags(rawText: string, tagText: string) {
   return appendTags(removeAllTaskTags(rawText), nextTags);
 }
 
-function replaceTaskTags(rawText: string, tagText: string, categoryTags: Record<Exclude<Category, "pool">, string>) {
+function replaceTaskTags(rawText: string, tagText: string, categoryTags: CategoryTagMap) {
   const categoryNames = new Set(Object.values(categoryTags).map((tag) => tag.replace(/^#/, "").toLowerCase()));
   const nextTags = normalizeTagInput(tagText).filter((tag) => !categoryNames.has(tag.toLowerCase()));
   return appendTags(removeAllTaskTags(rawText), nextTags);
@@ -1899,7 +2147,7 @@ function appendTags(rawText: string, tags: string[]) {
   return [cleaned, suffix].filter(Boolean).join(" ");
 }
 
-function getEditableTaskTags(task: TaskItem, categoryTags: Record<Exclude<Category, "pool">, string>) {
+function getEditableTaskTags(task: TaskItem, categoryTags: CategoryTagMap) {
   const categoryNames = new Set(Object.values(categoryTags).map((tag) => tag.replace(/^#/, "").toLowerCase()));
   return task.tags.filter((tag) => !categoryNames.has(tag.toLowerCase()));
 }
@@ -1910,6 +2158,10 @@ function extractCollaborators(raw: string): string[] {
   let match: RegExpExecArray | null;
   while ((match = re.exec(raw)) !== null) collaborators.push(match[1]);
   return Array.from(new Set(collaborators));
+}
+
+function mergeCollaborators(...groups: string[][]): string[] {
+  return Array.from(new Set(groups.flat()));
 }
 
 function extractLinks(lines: string[], sshRemotePathPrefixes: string[] = []): TaskLink[] {

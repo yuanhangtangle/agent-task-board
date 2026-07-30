@@ -19,7 +19,7 @@ const module = { exports: {} };
 const load = new Function("module", "exports", compiled);
 load(module, module.exports);
 
-const { getCurrentSubtaskSummary } = module.exports;
+const { getAdjacentSubtaskIndex, getCurrentSubtaskSummary } = module.exports;
 
 test("current subtask summary chooses the first incomplete subtask", () => {
   const summary = getCurrentSubtaskSummary([
@@ -51,6 +51,27 @@ test("current subtask summary falls back to the last completed subtask when all 
     completedCount: 2,
     totalCount: 2
   });
+});
+
+test("current subtask summary can browse a preferred previous or next subtask", () => {
+  const subtasks = [
+    { text: "整理验收材料", completed: true },
+    { text: "提交归档", completed: false },
+    { text: "同步结论", completed: false }
+  ];
+
+  assert.equal(getCurrentSubtaskSummary(subtasks, 0)?.text, "整理验收材料");
+  assert.equal(getCurrentSubtaskSummary(subtasks, 2)?.text, "同步结论");
+  assert.equal(getCurrentSubtaskSummary(subtasks, 99)?.index, 2);
+  assert.equal(getCurrentSubtaskSummary(subtasks, -1)?.index, 0);
+});
+
+test("adjacent subtask browsing stops at the first and last item", () => {
+  assert.equal(getAdjacentSubtaskIndex(1, -1, 3), 0);
+  assert.equal(getAdjacentSubtaskIndex(1, 1, 3), 2);
+  assert.equal(getAdjacentSubtaskIndex(0, -1, 3), 0);
+  assert.equal(getAdjacentSubtaskIndex(2, 1, 3), 2);
+  assert.equal(getAdjacentSubtaskIndex(0, 1, 0), -1);
 });
 
 test("current subtask summary is null when a task has no subtasks", () => {

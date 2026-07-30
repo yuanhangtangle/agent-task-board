@@ -34,11 +34,16 @@ function stripCompletionMetadata(raw) {
 }
 
 // subtaskSummary.ts
-function getCurrentSubtaskSummary(subtasks) {
+function getAdjacentSubtaskIndex(currentIndex, direction, totalCount) {
+  if (totalCount <= 0) return -1;
+  return Math.max(0, Math.min(currentIndex + direction, totalCount - 1));
+}
+function getCurrentSubtaskSummary(subtasks, preferredIndex) {
   if (subtasks.length === 0) return null;
   const completedCount = subtasks.filter((subtask) => subtask.completed).length;
   const incompleteIndex = subtasks.findIndex((subtask) => !subtask.completed);
-  const currentIndex = incompleteIndex >= 0 ? incompleteIndex : subtasks.length - 1;
+  const defaultIndex = incompleteIndex >= 0 ? incompleteIndex : subtasks.length - 1;
+  const currentIndex = preferredIndex === void 0 ? defaultIndex : Math.max(0, Math.min(preferredIndex, subtasks.length - 1));
   const current = subtasks[currentIndex];
   return {
     index: currentIndex,
@@ -49,15 +54,70 @@ function getCurrentSubtaskSummary(subtasks) {
   };
 }
 
+// taskDate.ts
+var BEIJING_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
+function getTaskDateTag(tags) {
+  return tags.find((tag) => isValidTaskDateKey(tag));
+}
+function getBeijingDateKey(now = /* @__PURE__ */ new Date()) {
+  const parts = BEIJING_DATE_FORMATTER.formatToParts(now);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+  if (!year || !month || !day) throw new Error("\u65E0\u6CD5\u83B7\u53D6\u5317\u4EAC\u65F6\u95F4");
+  return `${year}${month}${day}`;
+}
+function matchesTaskDateFilter(taskDate, filter, today) {
+  if (filter === "all") return true;
+  if (!taskDate) return false;
+  return filter === "today" ? taskDate === today : taskDate < today;
+}
+function formatTaskDateKey(taskDate) {
+  return `${taskDate.slice(0, 4)}-${taskDate.slice(4, 6)}-${taskDate.slice(6, 8)}`;
+}
+function isValidTaskDateKey(value) {
+  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const daysInMonth = [
+    31,
+    isLeapYear(year) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31
+  ];
+  return day <= daysInMonth[month - 1];
+}
+function isLeapYear(year) {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
 // main.ts
 var VIEW_TYPE_AGENT_TASK_BOARD = "agent-task-board-view";
 var DEFAULT_SETTINGS = {
   scanPathPatterns: ["Inbox.md", "Tasks/.*\\.md", "Projects/.*\\.md"],
   inboxFile: "Tasks/Inbox.md",
   completedTaskFile: "Tasks/Done.md",
+  useModernWorkflow: true,
   foregroundTag: "#foreground",
   agentTag: "#agent",
   collabTag: "#collab",
+  reviewTag: "#review",
   inqueueTag: "#inqueue",
   dateFormat: "YYYY-MM-DD",
   density: "compact",
@@ -67,19 +127,30 @@ var DEFAULT_SETTINGS = {
     foreground: [],
     agent: [],
     collab: [],
+    review: [],
     inqueue: [],
     pool: []
   }
 };
-var CATEGORY_LABELS = {
+var MODERN_CATEGORY_LABELS = {
+  foreground: "\u505A",
+  collab: "\u63A8",
+  review: "\u6536",
+  agent: "Agent",
+  inqueue: "\u961F\u5217",
+  pool: "\u4EFB\u52A1\u6C60",
+  completed: "\u5DF2\u5B8C\u6210"
+};
+var LEGACY_CATEGORY_LABELS = {
   foreground: "\u524D\u53F0\u4EFB\u52A1",
   agent: "Agent \u4EFB\u52A1",
   collab: "\u534F\u4F5C\u4EFB\u52A1",
+  review: "\u534F\u4F5C\u4EFB\u52A1",
   inqueue: "\u5165\u961F\u4EFB\u52A1",
   pool: "\u4EFB\u52A1\u6C60",
   completed: "\u5DF2\u5B8C\u6210"
 };
-var ACTIVE_CATEGORIES = ["foreground", "agent", "collab", "inqueue", "pool"];
+var ACTIVE_CATEGORIES = ["foreground", "agent", "collab", "review", "inqueue", "pool"];
 var FOCUS_PLANNER_TASK_MIME = "application/x-focus-planner-task";
 var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
   async onload() {
@@ -129,8 +200,12 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       foreground: prefixHash(this.settings.foregroundTag),
       agent: prefixHash(this.settings.agentTag),
       collab: prefixHash(this.settings.collabTag),
+      review: prefixHash(this.settings.reviewTag),
       inqueue: prefixHash(this.settings.inqueueTag)
     };
+  }
+  getCategoryLabel(category) {
+    return (this.settings.useModernWorkflow ? MODERN_CATEGORY_LABELS : LEGACY_CATEGORY_LABELS)[category];
   }
   async collectTasks() {
     const tasks = [];
@@ -152,11 +227,12 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         const originalBlock = lines.slice(i, blockRange.end + 1);
         const { subtasks, attachmentLines } = splitTaskBlockChildren(originalBlock);
         const tags = extractTags(raw);
-        const collaborators = extractCollaborators(raw);
-        const category = classifyTask(raw, categoryTags);
+        const collaborators = mergeCollaborators(extractCollaborators(raw), getActiveSubtask(subtasks)?.collaborators ?? []);
+        const category = classifyTask(raw, categoryTags, this.settings.useModernWorkflow);
         const created = extractDate(raw, "created", ["\u{1F4CB}"]);
         const start = extractDate(raw, "start", ["\u{1F6EB}", "\u23F3"]);
         const due = extractDate(raw, "due", ["\u{1F4C5}"]);
+        const taskDate = getTaskDateTag(tags);
         const text = cleanupTaskText(raw);
         if (!text) continue;
         tasks.push({
@@ -175,6 +251,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
           created: created ?? void 0,
           start: start ?? void 0,
           due: due ?? void 0,
+          taskDate,
           originalLine: line,
           originalBlock
         });
@@ -206,6 +283,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       const created = extractDate(raw, "created", ["\u{1F4CB}"]);
       const start = extractDate(raw, "start", ["\u{1F6EB}", "\u23F3"]);
       const due = extractDate(raw, "due", ["\u{1F4C5}"]);
+      const taskDate = getTaskDateTag(tags);
       const text = cleanupTaskText(stripCompletionMetadata(raw));
       if (!text) continue;
       tasks.push({
@@ -225,6 +303,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         start: start ?? void 0,
         due: due ?? void 0,
         completed: completed ?? void 0,
+        taskDate,
         originalLine: line,
         originalBlock
       });
@@ -301,7 +380,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     new import_obsidian.Notice("\u5DF2\u5220\u9664\u4EFB\u52A1");
   }
   async toggleSubtask(task, subtask, completed) {
-    const today = (0, import_obsidian.moment)().format(this.settings.dateFormat);
+    const today = getFormattedBeijingDate(this.settings.dateFormat);
     await this.app.vault.process(task.file, (data) => {
       const lines = data.split(/\r?\n/);
       const idx = findCurrentTaskLine(lines, task);
@@ -324,7 +403,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("\u8BF7\u5148\u5B8C\u6210\u6240\u6709\u5B50\u4EFB\u52A1");
       return;
     }
-    const today = (0, import_obsidian.moment)().format(this.settings.dateFormat);
+    const today = getFormattedBeijingDate(this.settings.dateFormat);
     const completedBlock = [...task.originalBlock];
     completedBlock[0] = `${setCheckboxCompletion(completedBlock[0], true, today)} <!-- from: ${task.file.path}:${task.line + 1} -->`;
     if (this.settings.moveCompletedTasks && this.settings.completedTaskFile.trim()) {
@@ -342,7 +421,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     const categoryTags = this.getCategoryTags();
     await this.transformTaskLine(task, (line) => setCategoryTag(line, category, categoryTags));
     this.refreshView();
-    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${CATEGORY_LABELS[category]}`);
+    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${this.getCategoryLabel(category)}`);
   }
   async moveTask(task, category, targetId, position) {
     const categoryTags = this.getCategoryTags();
@@ -351,7 +430,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     }
     this.setOrderPosition(task.id, category, targetId, position);
     await this.saveSettings();
-    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${CATEGORY_LABELS[category]}`);
+    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${this.getCategoryLabel(category)}`);
   }
   async moveTaskLine(task, category, targetTask, position) {
     const categoryTags = this.getCategoryTags();
@@ -368,12 +447,12 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
         await this.removeTaskBlock(task);
         await this.app.vault.process(inboxFile, (data) => appendBlock(data, nextBlock));
         this.refreshView();
-        new import_obsidian.Notice(`\u5DF2\u6062\u590D\u5230${CATEGORY_LABELS[category]}`);
+        new import_obsidian.Notice(`\u5DF2\u6062\u590D\u5230${this.getCategoryLabel(category)}`);
         return;
       }
       await this.replaceTaskBlock(task, rewriteBlock(task.originalBlock));
       this.refreshView();
-      new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${CATEGORY_LABELS[category]}`);
+      new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${this.getCategoryLabel(category)}`);
       return;
     }
     if (task.file.path === targetTask.file.path) {
@@ -426,7 +505,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
       });
     }
     this.refreshView();
-    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${CATEGORY_LABELS[category]}`);
+    new import_obsidian.Notice(`\u5DF2\u79FB\u52A8\u5230${this.getCategoryLabel(category)}`);
   }
   syncTaskOrder(tasks) {
     const presentIds = new Set(tasks.map((task) => task.id));
@@ -516,9 +595,13 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     this.filterCollabs = [];
     this.excludeCollabs = [];
     this.filterMode = "AND";
+    this.taskDateFilter = "all";
     this.completedFilter = "7d";
-    this.expandedTaskIds = /* @__PURE__ */ new Set();
+    this.expandedCardIds = /* @__PURE__ */ new Set();
+    this.expandedAttachmentIds = /* @__PURE__ */ new Set();
     this.expandedSubtaskIds = /* @__PURE__ */ new Set();
+    this.selectedSubtaskIndexes = /* @__PURE__ */ new Map();
+    this.lastSubtaskWheelAt = /* @__PURE__ */ new Map();
     this.plugin = plugin;
   }
   getViewType() {
@@ -539,34 +622,35 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const root = this.containerEl;
     root.empty();
     root.toggleClass("atb-compact", this.plugin.settings.density === "compact");
+    root.toggleClass("atb-modern-workflow", this.plugin.settings.useModernWorkflow);
     const outer = root.createDiv({ cls: "atb-outer" });
     this.renderTopbar(outer);
     let tasks = await this.plugin.collectTasks();
-    let completedTasks = await this.plugin.collectCompletedTasks();
+    let completedTasks = this.plugin.settings.useModernWorkflow ? [] : await this.plugin.collectCompletedTasks();
     tasks.sort(compareTasks);
     completedTasks.sort(compareCompletedTasks);
     this.renderFilterToolbar(outer, [...tasks, ...completedTasks]);
-    tasks = this.applyFilters(tasks);
-    completedTasks = this.applyCompletedFilter(this.applyFilters(completedTasks));
+    tasks = this.applyTaskDateFilter(this.applyFilters(tasks));
+    completedTasks = this.taskDateFilter === "all" ? this.applyCompletedFilter(this.applyFilters(completedTasks)) : [];
     const grid = outer.createDiv({ cls: "atb-board" });
-    const panels = {
-      foreground: this.createPanel(grid, "\u524D\u53F0\u4EFB\u52A1", "atb-q-foreground", "foreground"),
-      agent: this.createPanel(grid, "Agent \u4EFB\u52A1", "atb-q-agent", "agent"),
-      collab: this.createPanel(grid, "\u534F\u4F5C\u4EFB\u52A1", "atb-q-collab", "collab"),
-      inqueue: this.createPanel(grid, "\u5165\u961F\u4EFB\u52A1", "atb-q-inqueue", "inqueue"),
-      pool: this.createPanel(grid, "\u4EFB\u52A1\u6C60", "atb-q-pool", "pool"),
-      completed: this.createPanel(grid, "\u5DF2\u5B8C\u6210", "atb-q-completed")
-    };
-    const counters = { foreground: 0, agent: 0, collab: 0, inqueue: 0, pool: 0, completed: 0 };
-    const tasksByCategory = { foreground: [], agent: [], collab: [], inqueue: [], pool: [], completed: [] };
+    const layout = getBoardLayout(this.plugin.settings.useModernWorkflow);
+    const panels = {};
+    for (const panel of layout) {
+      panels[panel.category] = this.createPanel(grid, panel.title, panel.cls, panel.category === "completed" ? void 0 : panel.category);
+    }
+    const counters = { foreground: 0, agent: 0, collab: 0, review: 0, inqueue: 0, pool: 0, completed: 0 };
+    const tasksByCategory = { foreground: [], agent: [], collab: [], review: [], inqueue: [], pool: [], completed: [] };
     for (const task of [...tasks, ...completedTasks]) {
+      const panel = panels[task.category];
+      if (!panel) continue;
       counters[task.category]++;
       tasksByCategory[task.category].push(task);
-      panels[task.category].list.appendChild(this.renderTaskCard(task));
+      panel.list.appendChild(this.renderTaskCard(task));
     }
-    Object.keys(panels).forEach((category) => panels[category].countEl.setText(String(counters[category])));
-    for (const category of ["foreground", "agent", "collab", "inqueue", "pool"]) {
+    for (const panel of layout) panels[panel.category]?.countEl.setText(String(counters[panel.category]));
+    for (const category of layout.map((panel) => panel.category).filter(isActiveCategory)) {
       const panel = panels[category];
+      if (!panel) continue;
       panel.list.addEventListener("dragover", (ev) => {
         if (ev.target.closest(".atb-card")) return;
         ev.preventDefault();
@@ -638,14 +722,19 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       task.file.path,
       `\u884C ${task.line + 1}`,
       task.due ? `\u622A\u6B62 ${(0, import_obsidian.moment)(task.due).format(this.plugin.settings.dateFormat)}` : "",
+      task.taskDate ? `\u4EFB\u52A1\u65E5\u671F ${formatTaskDateKey(task.taskDate)}\uFF08\u5317\u4EAC\u65F6\u95F4\uFF09` : "",
       task.completed ? `\u5B8C\u6210 ${(0, import_obsidian.moment)(task.completed).format(this.plugin.settings.dateFormat)}` : "",
       task.created ? `\u521B\u5EFA ${(0, import_obsidian.moment)(task.created).format(this.plugin.settings.dateFormat)}` : ""
     ].filter(Boolean);
-    const isExpanded = this.expandedTaskIds.has(task.id);
+    const isCardExpanded = this.expandedCardIds.has(task.id);
+    const isAttachmentsExpanded = this.expandedAttachmentIds.has(task.id);
     const isSubtasksExpanded = this.expandedSubtaskIds.has(task.id);
     const incompleteSubtasks = task.subtasks.filter((subtask) => !subtask.completed).length;
     const isCompletionBlocked = task.category !== "completed" && incompleteSubtasks > 0;
-    const card = createDiv({ cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isExpanded || isSubtasksExpanded ? "is-expanded" : ""}`, attr: { draggable: "true", title: tooltipParts.join(" \xB7 ") } });
+    const card = createDiv({
+      cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isCardExpanded ? "is-expanded" : "is-collapsed"}`,
+      attr: { draggable: "true", title: [...tooltipParts, isCardExpanded ? "" : "\u70B9\u51FB\u5C55\u5F00"].filter(Boolean).join(" \xB7 ") }
+    });
     card.addEventListener("dragstart", (ev) => {
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
@@ -716,6 +805,15 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
         new import_obsidian.Notice("\u62D6\u62FD\u6392\u5E8F\u5931\u8D25");
       }
     });
+    if (!isCardExpanded) {
+      this.renderCollapsedTaskCard(card, task, incompleteSubtasks);
+      card.addEventListener("click", (event) => {
+        if (event.target.closest("button, input, .atb-clickable-chip")) return;
+        this.expandedCardIds.add(task.id);
+        card.replaceWith(this.renderTaskCard(task));
+      });
+      return card;
+    }
     const top = card.createDiv({ cls: "atb-card-top" });
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
@@ -729,6 +827,15 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       await this.renderTasks();
     });
     const title = top.createDiv({ cls: "atb-task-title", text: task.text });
+    const collapseButton = top.createEl("button", { cls: "atb-card-edit atb-card-collapse" });
+    collapseButton.setAttribute("aria-label", "\u6298\u53E0\u4EFB\u52A1");
+    collapseButton.setAttribute("title", "\u6298\u53E0\u4EFB\u52A1");
+    (0, import_obsidian.setIcon)(collapseButton, "chevron-up");
+    collapseButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.expandedCardIds.delete(task.id);
+      card.replaceWith(this.renderTaskCard(task));
+    });
     const editButton = top.createEl("button", { cls: "atb-card-edit" });
     editButton.setAttribute("aria-label", "\u7F16\u8F91\u4EFB\u52A1");
     editButton.setAttribute("title", "\u7F16\u8F91\u4EFB\u52A1");
@@ -752,6 +859,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     }
     if (task.tags.length > 0) {
       for (const tag of task.tags) {
+        if (tag === task.taskDate) continue;
         const chip = createChip(`#${tag}`, "atb-chip-tag");
         chip.setAttribute("data-tag-color", String(getTagColorIndex(tag)));
         chip.addClass("atb-clickable-chip");
@@ -763,6 +871,19 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
         chips.appendChild(chip);
       }
     }
+    if (task.taskDate) {
+      const today = getBeijingDateKey();
+      const state = task.taskDate === today ? "\u4ECA\u5929" : task.taskDate < today ? "\u903E\u671F" : "";
+      const chip = createChip(`#${task.taskDate}${state ? ` \xB7 ${state}` : ""}`, "atb-chip-date");
+      if (task.taskDate < today) chip.addClass("atb-chip-danger");
+      chip.addClass("atb-clickable-chip");
+      chip.setAttribute("title", `\u5317\u4EAC\u65F6\u95F4\u4EFB\u52A1\u65E5\u671F ${formatTaskDateKey(task.taskDate)}\uFF1B\u70B9\u51FB\u7B5B\u9009\u8BE5\u65E5\u671F`);
+      chip.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.addFilterValue(this.filterTags, task.taskDate);
+      });
+      chips.appendChild(chip);
+    }
     if (task.due) {
       const today = (0, import_obsidian.moment)().startOf("day");
       const due = (0, import_obsidian.moment)(task.due).startOf("day");
@@ -773,24 +894,40 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     if (task.completed) {
       chips.appendChild(createChip(`\u5B8C\u6210 ${(0, import_obsidian.moment)(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
     }
-    const currentSubtask = !isSubtasksExpanded ? getCurrentSubtaskSummary(task.subtasks) : null;
+    const preferredSubtaskIndex = this.selectedSubtaskIndexes.get(task.id);
+    const currentSubtask = !isSubtasksExpanded ? getCurrentSubtaskSummary(task.subtasks, preferredSubtaskIndex) : null;
     if (currentSubtask) {
       const summary = card.createDiv({
         cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
-        attr: { title: `\u5F53\u524D\u5B50\u4EFB\u52A1 ${currentSubtask.completedCount}/${currentSubtask.totalCount}: ${currentSubtask.text}` }
+        attr: { title: `\u5B50\u4EFB\u52A1 ${currentSubtask.index + 1}/${currentSubtask.totalCount}\uFF1A${currentSubtask.text}\uFF1B\u6EDA\u8F6E\u5207\u6362\u4E0A\u4E00\u6761/\u4E0B\u4E00\u6761` }
       });
+      summary.addEventListener("wheel", (event) => {
+        if (currentSubtask.totalCount < 2 || Math.abs(event.deltaY) < 1) return;
+        const direction = event.deltaY > 0 ? 1 : -1;
+        const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, direction, currentSubtask.totalCount);
+        if (nextIndex === currentSubtask.index) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const now = Date.now();
+        const lastWheelAt = this.lastSubtaskWheelAt.get(task.id) ?? 0;
+        if (now - lastWheelAt < 140) return;
+        this.lastSubtaskWheelAt.set(task.id, now);
+        this.selectedSubtaskIndexes.set(task.id, nextIndex);
+        card.replaceWith(this.renderTaskCard(task));
+      }, { passive: false });
       const summaryBox = summary.createEl("input", { type: "checkbox" });
       summaryBox.addClass("atb-current-subtask-box");
       summaryBox.checked = currentSubtask.completed;
-      summaryBox.disabled = task.category === "completed" || currentSubtask.completed;
+      summaryBox.disabled = task.category === "completed";
       summaryBox.addEventListener("click", (event) => event.stopPropagation());
       summaryBox.addEventListener("change", async () => {
         const subtask = task.subtasks[currentSubtask.index];
-        if (!subtask || subtask.completed || task.category === "completed") return;
-        await this.plugin.toggleSubtask(task, subtask, true);
+        if (!subtask || task.category === "completed") return;
+        await this.plugin.toggleSubtask(task, subtask, summaryBox.checked);
         await this.renderTasks();
       });
       summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
+      summary.createDiv({ cls: "atb-current-subtask-position", text: `${currentSubtask.index + 1}/${currentSubtask.totalCount}` });
     }
     const footer = card.createDiv({ cls: "atb-card-footer" });
     const source = footer.createDiv({ cls: "atb-source", text: `${task.file.basename}:${task.line + 1}` });
@@ -810,23 +947,48 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
         event.stopPropagation();
         if (this.expandedSubtaskIds.has(task.id)) this.expandedSubtaskIds.delete(task.id);
         else this.expandedSubtaskIds.add(task.id);
-        void this.renderTasks();
+        card.replaceWith(this.renderTaskCard(task));
       });
     }
     const linkIndicator = footer.createEl("button", {
       cls: `atb-link-indicator ${task.links.length === 0 ? "is-empty" : ""}`,
       text: `\u9644\u4EF6 ${task.links.length}`
     });
-    linkIndicator.setAttribute("title", isExpanded ? "\u6536\u8D77\u9644\u4EF6" : "\u5C55\u5F00\u9644\u4EF6");
+    linkIndicator.setAttribute("title", isAttachmentsExpanded ? "\u6536\u8D77\u9644\u4EF6" : "\u5C55\u5F00\u9644\u4EF6");
     linkIndicator.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (this.expandedTaskIds.has(task.id)) this.expandedTaskIds.delete(task.id);
-      else this.expandedTaskIds.add(task.id);
-      void this.renderTasks();
+      if (this.expandedAttachmentIds.has(task.id)) this.expandedAttachmentIds.delete(task.id);
+      else this.expandedAttachmentIds.add(task.id);
+      card.replaceWith(this.renderTaskCard(task));
     });
     if (isSubtasksExpanded) this.renderSubtaskDetails(card, task);
-    if (isExpanded) this.renderTaskDetails(card, task);
+    if (isAttachmentsExpanded) this.renderTaskDetails(card, task);
     return card;
+  }
+  renderCollapsedTaskCard(card, task, incompleteSubtasks) {
+    const row = card.createDiv({ cls: "atb-collapsed-row" });
+    row.createDiv({ cls: "atb-collapsed-title", text: task.text });
+    if (task.collaborators.length > 0) {
+      const mentions = row.createDiv({ cls: "atb-collapsed-mentions" });
+      for (const collaborator of task.collaborators) {
+        const chip = createChip(`@${collaborator}`, "atb-chip-collab");
+        chip.addClass("atb-clickable-chip");
+        chip.setAttribute("title", `\u7B5B\u9009 @${collaborator}`);
+        chip.addEventListener("click", (event) => {
+          event.stopPropagation();
+          this.addFilterValue(this.filterCollabs, collaborator);
+        });
+        mentions.appendChild(chip);
+      }
+    }
+    if (task.subtasks.length > 0) {
+      const completedSubtasks = task.subtasks.length - incompleteSubtasks;
+      const progress = row.createDiv({
+        cls: `atb-collapsed-progress ${incompleteSubtasks === 0 ? "is-complete" : ""}`,
+        text: `\u2705${completedSubtasks}/${task.subtasks.length}`
+      });
+      progress.setAttribute("title", `\u5B50\u4EFB\u52A1\u5B8C\u6210 ${completedSubtasks}/${task.subtasks.length}`);
+    }
   }
   renderSubtaskDetails(card, task) {
     const details = card.createDiv({ cls: "atb-subtask-details" });
@@ -843,6 +1005,19 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       });
       const title = row.createDiv({ cls: "atb-subtask-title", text: subtask.text });
       title.toggleClass("is-complete", subtask.completed);
+      if (!subtask.completed && subtask.collaborators.length > 0) {
+        const mentions = row.createDiv({ cls: "atb-subtask-mentions" });
+        for (const collaborator of subtask.collaborators) {
+          const chip = createChip(`@${collaborator}`, "atb-chip-collab");
+          chip.addClass("atb-clickable-chip");
+          chip.setAttribute("title", `\u7B5B\u9009 @${collaborator}`);
+          chip.addEventListener("click", (event) => {
+            event.stopPropagation();
+            this.addFilterValue(this.filterCollabs, collaborator);
+          });
+          mentions.appendChild(chip);
+        }
+      }
     }
   }
   renderTaskDetails(card, task) {
@@ -881,7 +1056,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     const tags = Array.from(new Set(allTasks.flatMap((task) => task.tags))).sort();
     const collaborators = Array.from(new Set(allTasks.flatMap((task) => task.collaborators))).sort();
     const toolbar = container.createDiv({ cls: "atb-filter-toolbar" });
-    const activeFilters = this.filterTags.length + this.excludeTags.length + this.filterCollabs.length + this.excludeCollabs.length;
+    const activeFilters = this.filterTags.length + this.excludeTags.length + this.filterCollabs.length + this.excludeCollabs.length + (this.taskDateFilter === "all" ? 0 : 1);
     const modeSelect = toolbar.createEl("select", { cls: "atb-filter-mode" });
     modeSelect.createEl("option", { value: "AND", text: "\u8FC7\u6EE4\uFF1AAND" });
     modeSelect.createEl("option", { value: "OR", text: "\u8FC7\u6EE4\uFF1AOR" });
@@ -895,26 +1070,41 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     for (const tag of this.excludeTags) this.renderFilterChip(toolbar, tag, "#", true, this.filterTags, this.excludeTags, "tag");
     for (const collaborator of this.filterCollabs) this.renderFilterChip(toolbar, collaborator, "@", false, this.filterCollabs, this.excludeCollabs, "collab");
     for (const collaborator of this.excludeCollabs) this.renderFilterChip(toolbar, collaborator, "@", true, this.filterCollabs, this.excludeCollabs, "collab");
-    if (activeFilters >= 2) {
+    for (const option of [
+      { value: "today", label: "\u5F53\u5929\u4EFB\u52A1" },
+      { value: "overdue", label: "\u8FC7\u671F\u4EFB\u52A1" }
+    ]) {
+      const button = toolbar.createEl("button", { cls: "atb-date-filter", text: option.label });
+      button.toggleClass("is-active", this.taskDateFilter === option.value);
+      button.setAttribute("title", `${option.label}\uFF08\u5317\u4EAC\u65F6\u95F4 ${formatTaskDateKey(getBeijingDateKey())}\uFF09`);
+      button.addEventListener("click", () => {
+        this.taskDateFilter = this.taskDateFilter === option.value ? "all" : option.value;
+        void this.renderTasks();
+      });
+    }
+    if (activeFilters > 0) {
       const clearButton = toolbar.createEl("button", { cls: "atb-clear-filter", text: "\u6E05\u9664" });
       clearButton.addEventListener("click", () => {
         this.filterTags = [];
         this.excludeTags = [];
         this.filterCollabs = [];
         this.excludeCollabs = [];
+        this.taskDateFilter = "all";
         void this.renderTasks();
       });
     }
-    const completedSelect = toolbar.createEl("select", { cls: "atb-completed-filter" });
-    completedSelect.createEl("option", { value: "today", text: "\u5B8C\u6210\uFF1A\u4ECA\u5929" });
-    completedSelect.createEl("option", { value: "7d", text: "\u5B8C\u6210\uFF1A7\u5929" });
-    completedSelect.createEl("option", { value: "30d", text: "\u5B8C\u6210\uFF1A30\u5929" });
-    completedSelect.createEl("option", { value: "all", text: "\u5B8C\u6210\uFF1A\u5168\u90E8" });
-    completedSelect.value = this.completedFilter;
-    completedSelect.addEventListener("change", () => {
-      this.completedFilter = completedSelect.value;
-      void this.renderTasks();
-    });
+    if (!this.plugin.settings.useModernWorkflow) {
+      const completedSelect = toolbar.createEl("select", { cls: "atb-completed-filter" });
+      completedSelect.createEl("option", { value: "today", text: "\u5B8C\u6210\uFF1A\u4ECA\u5929" });
+      completedSelect.createEl("option", { value: "7d", text: "\u5B8C\u6210\uFF1A7\u5929" });
+      completedSelect.createEl("option", { value: "30d", text: "\u5B8C\u6210\uFF1A30\u5929" });
+      completedSelect.createEl("option", { value: "all", text: "\u5B8C\u6210\uFF1A\u5168\u90E8" });
+      completedSelect.value = this.completedFilter;
+      completedSelect.addEventListener("change", () => {
+        this.completedFilter = completedSelect.value;
+        void this.renderTasks();
+      });
+    }
     this.renderFilterInput(toolbar, tags, collaborators);
   }
   renderFilterChip(container, name, prefix, isExclude, includeList, excludeList, type) {
@@ -1018,7 +1208,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
   }
   applyCompletedFilter(tasks) {
     if (this.completedFilter === "all") return tasks;
-    const now = (0, import_obsidian.moment)().startOf("day");
+    const now = (0, import_obsidian.moment)(getBeijingDateKey(), "YYYYMMDD", true).startOf("day");
     return tasks.filter((task) => {
       if (!task.completed) return this.completedFilter === "all";
       const completed = (0, import_obsidian.moment)(task.completed).startOf("day");
@@ -1026,6 +1216,11 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       const days = this.completedFilter === "7d" ? 7 : 30;
       return !completed.isBefore(now.clone().subtract(days - 1, "days"), "day");
     });
+  }
+  applyTaskDateFilter(tasks) {
+    if (this.taskDateFilter === "all") return tasks;
+    const today = getBeijingDateKey();
+    return tasks.filter((task) => matchesTaskDateFilter(task.taskDate, this.taskDateFilter, today));
   }
 };
 var CreateTaskModal = class extends import_obsidian.Modal {
@@ -1058,9 +1253,9 @@ var CreateTaskModal = class extends import_obsidian.Modal {
       text.setPlaceholder("\u8C03\u7814\u65B9\u6848\n\u5B9E\u73B0\u5199\u56DE\n\u9A8C\u8BC1\u5F52\u6863");
       text.onChange((value) => this.subtaskText = value);
     });
-    new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B\u5206\u7C7B\u6807\u7B7E\u7531\u8C61\u9650\u81EA\u52A8\u7EF4\u62A4\u3002").addText((text) => {
+    new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B#YYYYMMDD \u8868\u793A\u5317\u4EAC\u65F6\u95F4\u4EFB\u52A1\u65E5\u671F\uFF0C\u5206\u7C7B\u6807\u7B7E\u7531\u9762\u677F\u81EA\u52A8\u7EF4\u62A4\u3002").addText((text) => {
       text.setValue(this.tagText);
-      text.setPlaceholder("#today #important");
+      text.setPlaceholder("#20260730 #important");
       text.onChange((value) => this.tagText = value);
     });
     new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u3001\u672C\u673A\u6587\u4EF6\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
@@ -1074,7 +1269,12 @@ var CreateTaskModal = class extends import_obsidian.Modal {
       this.onOpen();
     });
     new import_obsidian.Setting(contentEl).setName("\u5206\u7C7B").addDropdown((dropdown) => {
-      dropdown.addOption("foreground", "\u524D\u53F0\u4EFB\u52A1").addOption("agent", "Agent \u4EFB\u52A1").addOption("collab", "\u534F\u4F5C\u4EFB\u52A1").addOption("inqueue", "\u5165\u961F\u4EFB\u52A1").addOption("pool", "\u4EFB\u52A1\u6C60").setValue(this.category).onChange((value) => this.category = value);
+      if (this.plugin.settings.useModernWorkflow) {
+        dropdown.addOption("foreground", "\u505A").addOption("collab", "\u63A8").addOption("review", "\u6536").addOption("agent", "Agent").addOption("inqueue", "\u961F\u5217").addOption("pool", "\u4EFB\u52A1\u6C60");
+      } else {
+        dropdown.addOption("foreground", "\u524D\u53F0\u4EFB\u52A1").addOption("agent", "Agent \u4EFB\u52A1").addOption("collab", "\u534F\u4F5C\u4EFB\u52A1").addOption("inqueue", "\u5165\u961F\u4EFB\u52A1").addOption("pool", "\u4EFB\u52A1\u6C60");
+      }
+      dropdown.setValue(this.category).onChange((value) => this.category = value);
     });
     new import_obsidian.Setting(contentEl).setName("\u76EE\u6807\u6587\u4EF6").addText((text) => {
       text.setValue(this.targetFile);
@@ -1119,9 +1319,9 @@ var EditTaskModal = class extends import_obsidian.Modal {
       text.setValue(this.subtaskText);
       text.onChange((value) => this.subtaskText = value);
     });
-    new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B\u4FDD\u5B58\u65F6\u66FF\u6362\u4EFB\u52A1\u91CC\u7684\u666E\u901A\u6807\u7B7E\u3002").addText((text) => {
+    new import_obsidian.Setting(contentEl).setName("\u6807\u7B7E").setDesc("\u7A7A\u683C\u5206\u9694\uFF0C\u652F\u6301\u5199 #tag\uFF1B#YYYYMMDD \u8868\u793A\u5317\u4EAC\u65F6\u95F4\u4EFB\u52A1\u65E5\u671F\uFF0C\u4FDD\u5B58\u65F6\u66FF\u6362\u4EFB\u52A1\u91CC\u7684\u666E\u901A\u6807\u7B7E\u3002").addText((text) => {
       text.setValue(this.tagText);
-      text.setPlaceholder("#today #important");
+      text.setPlaceholder("#20260730 #important");
       text.onChange((value) => this.tagText = value);
     });
     new import_obsidian.Setting(contentEl).setName("\u9644\u4EF6").setDesc("\u6BCF\u884C\u4E00\u4E2A\u94FE\u63A5\u3001\u672C\u673A\u6587\u4EF6\u6216\u8BF4\u660E\uFF0C\u4F1A\u5199\u6210\u4EFB\u52A1\u4E0B\u65B9\u7684\u7F29\u8FDB\u5B50\u9879\u3002").addTextArea((text) => {
@@ -1162,6 +1362,11 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Agent Task Board \u8BBE\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u65B0\u7248\u5DE5\u4F5C\u6D41\uFF1A\u505A / \u63A8 / \u6536").setDesc("\u5F00\u542F\u540E\u4F7F\u7528\u201C\u505A\u3001\u63A8\u3001\u6536 / Agent\u3001\u961F\u5217\u3001\u4EFB\u52A1\u6C60\u201D\u516D\u5217\uFF1B\u5173\u95ED\u540E\u6062\u590D\u65E7\u7248\u516D\u5217\u548C\u5DF2\u5B8C\u6210\u4EFB\u52A1\u9762\u677F\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.useModernWorkflow).onChange(async (value) => {
+      this.plugin.settings.useModernWorkflow = value;
+      await this.plugin.saveSettings();
+      this.display();
+    }));
     new import_obsidian.Setting(containerEl).setName("\u626B\u63CF\u8DEF\u5F84\u6B63\u5219").setDesc("\u6BCF\u884C\u4E00\u4E2A vault \u76F8\u5BF9\u8DEF\u5F84\u6B63\u5219\u3002\u7559\u7A7A\u8868\u793A\u626B\u63CF\u6240\u6709 Markdown \u6587\u4EF6\u3002").addTextArea((text) => {
       text.inputEl.rows = 5;
       text.setValue(this.plugin.settings.scanPathPatterns.join("\n"));
@@ -1190,7 +1395,7 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u524D\u53F0\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.foregroundTag).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName(this.plugin.settings.useModernWorkflow ? "\u505A\u4EFB\u52A1\u6807\u7B7E" : "\u524D\u53F0\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.foregroundTag).onChange(async (value) => {
       this.plugin.settings.foregroundTag = value.trim() || "#foreground";
       await this.plugin.saveSettings();
     }));
@@ -1198,15 +1403,21 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.agentTag = value.trim() || "#agent";
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u534F\u4F5C\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.collabTag).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName(this.plugin.settings.useModernWorkflow ? "\u63A8\u4EFB\u52A1\u6807\u7B7E" : "\u534F\u4F5C\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.collabTag).onChange(async (value) => {
       this.plugin.settings.collabTag = value.trim() || "#collab";
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u5165\u961F\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.inqueueTag).onChange(async (value) => {
+    if (this.plugin.settings.useModernWorkflow) {
+      new import_obsidian.Setting(containerEl).setName("\u6536\u4EFB\u52A1\u6807\u7B7E").setDesc("\u5207\u56DE\u65E7\u7248\u5DE5\u4F5C\u6D41\u65F6\uFF0C\u5E26\u6B64\u6807\u7B7E\u7684\u4EFB\u52A1\u4F1A\u5E76\u5165\u201C\u534F\u4F5C\u4EFB\u52A1\u201D\u3002").addText((text) => text.setValue(this.plugin.settings.reviewTag).onChange(async (value) => {
+        this.plugin.settings.reviewTag = value.trim() || "#review";
+        await this.plugin.saveSettings();
+      }));
+    }
+    new import_obsidian.Setting(containerEl).setName(this.plugin.settings.useModernWorkflow ? "\u961F\u5217\u4EFB\u52A1\u6807\u7B7E" : "\u5165\u961F\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.inqueueTag).onChange(async (value) => {
       this.plugin.settings.inqueueTag = value.trim() || "#inqueue";
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u65E5\u671F\u683C\u5F0F").addText((text) => text.setValue(this.plugin.settings.dateFormat).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("\u65E5\u671F\u683C\u5F0F").setDesc("\u7528\u4E8E\u5B8C\u6210\u65E5\u671F\u7B49\u663E\u793A\uFF1B\u4EFB\u52A1\u65E5\u671F\u6807\u7B7E\u56FA\u5B9A\u4F7F\u7528 #YYYYMMDD\u3002").addText((text) => text.setValue(this.plugin.settings.dateFormat).onChange(async (value) => {
       this.plugin.settings.dateFormat = value.trim() || "YYYY-MM-DD";
       await this.plugin.saveSettings();
     }));
@@ -1216,7 +1427,7 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
     }));
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "\u5206\u7C7B\u51B2\u7A81\u4F18\u5148\u7EA7\u56FA\u5B9A\u4E3A\uFF1A#foreground > #agent > #collab > #inqueue > \u65E0\u6807\u7B7E\u3002\u62D6\u62FD\u4F1A\u5148\u79FB\u9664\u56DB\u4E2A\u5206\u7C7B\u6807\u7B7E\uFF0C\u518D\u5199\u5165\u76EE\u6807\u5206\u7C7B\u6807\u7B7E\u3002"
+      text: this.plugin.settings.useModernWorkflow ? "\u65B0\u7248\u5206\u7C7B\u4F18\u5148\u7EA7\u56FA\u5B9A\u4E3A\uFF1A\u505A > \u63A8 > \u6536 > Agent > \u961F\u5217 > \u4EFB\u52A1\u6C60\u3002\u62D6\u62FD\u4F1A\u5148\u79FB\u9664\u6240\u6709\u5206\u7C7B\u6807\u7B7E\uFF0C\u518D\u5199\u5165\u76EE\u6807\u5206\u7C7B\u6807\u7B7E\u3002" : "\u65E7\u7248\u5206\u7C7B\u4F18\u5148\u7EA7\u56FA\u5B9A\u4E3A\uFF1A\u524D\u53F0 > Agent > \u534F\u4F5C\uFF08\u542B\u65B0\u7248\u201C\u6536\u201D\uFF09> \u5165\u961F > \u4EFB\u52A1\u6C60\u3002\u62D6\u62FD\u4F1A\u5148\u79FB\u9664\u6240\u6709\u5206\u7C7B\u6807\u7B7E\uFF0C\u518D\u5199\u5165\u76EE\u6807\u5206\u7C7B\u6807\u7B7E\u3002"
     });
   }
 };
@@ -1228,6 +1439,29 @@ var STRICT_DATE_FORMATS = [
   "YYYY-MM-DDTHH:mm",
   "YYYY-MM-DDTHH:mm:ss"
 ];
+function getBoardLayout(useModernWorkflow) {
+  if (useModernWorkflow) {
+    return [
+      { category: "foreground", title: MODERN_CATEGORY_LABELS.foreground, cls: "atb-q-foreground" },
+      { category: "collab", title: MODERN_CATEGORY_LABELS.collab, cls: "atb-q-collab" },
+      { category: "review", title: MODERN_CATEGORY_LABELS.review, cls: "atb-q-review" },
+      { category: "agent", title: MODERN_CATEGORY_LABELS.agent, cls: "atb-q-agent" },
+      { category: "inqueue", title: MODERN_CATEGORY_LABELS.inqueue, cls: "atb-q-inqueue" },
+      { category: "pool", title: MODERN_CATEGORY_LABELS.pool, cls: "atb-q-pool" }
+    ];
+  }
+  return [
+    { category: "foreground", title: LEGACY_CATEGORY_LABELS.foreground, cls: "atb-q-foreground" },
+    { category: "agent", title: LEGACY_CATEGORY_LABELS.agent, cls: "atb-q-agent" },
+    { category: "collab", title: LEGACY_CATEGORY_LABELS.collab, cls: "atb-q-collab" },
+    { category: "inqueue", title: LEGACY_CATEGORY_LABELS.inqueue, cls: "atb-q-inqueue" },
+    { category: "pool", title: LEGACY_CATEGORY_LABELS.pool, cls: "atb-q-pool" },
+    { category: "completed", title: LEGACY_CATEGORY_LABELS.completed, cls: "atb-q-completed" }
+  ];
+}
+function getFormattedBeijingDate(format) {
+  return (0, import_obsidian.moment)(getBeijingDateKey(), "YYYYMMDD", true).format(format);
+}
 function compilePathMatchers(patterns) {
   return patterns.map((pattern) => {
     try {
@@ -1238,10 +1472,16 @@ function compilePathMatchers(patterns) {
     }
   }).filter((re) => re !== null);
 }
-function classifyTask(raw, tags) {
+function classifyTask(raw, tags, useModernWorkflow) {
   if (containsTag(raw, tags.foreground)) return "foreground";
-  if (containsTag(raw, tags.agent)) return "agent";
-  if (containsTag(raw, tags.collab)) return "collab";
+  if (useModernWorkflow) {
+    if (containsTag(raw, tags.collab)) return "collab";
+    if (containsTag(raw, tags.review)) return "review";
+    if (containsTag(raw, tags.agent)) return "agent";
+  } else {
+    if (containsTag(raw, tags.agent)) return "agent";
+    if (containsTag(raw, tags.collab) || containsTag(raw, tags.review)) return "collab";
+  }
   if (containsTag(raw, tags.inqueue)) return "inqueue";
   return "pool";
 }
@@ -1329,7 +1569,10 @@ function normalizeSubtaskInput(value) {
   });
 }
 function serializeSubtasksForEdit(subtasks) {
-  return subtasks.map((subtask) => `[${subtask.completed ? "x" : " "}] ${subtask.text}`).join("\n");
+  return subtasks.map((subtask) => {
+    const collaborators = subtask.collaborators.map((collaborator) => `@${collaborator}`).join(" ");
+    return `[${subtask.completed ? "x" : " "}] ${[subtask.text, collaborators].filter(Boolean).join(" ")}`;
+  }).join("\n");
 }
 function cleanupAttachmentLine(line) {
   return line.trim().replace(/^[-*]\s+/, "").trim();
@@ -1350,10 +1593,14 @@ function parseSubtaskLine(line, lineOffset) {
   if (!match) return null;
   return {
     text: cleanupTaskText(stripCompletionMetadata(match[3])),
+    collaborators: extractCollaborators(match[3]),
     completed: match[2].toLowerCase() === "x",
     lineOffset,
     originalLine: line
   };
+}
+function getActiveSubtask(subtasks) {
+  return subtasks.find((subtask) => !subtask.completed) ?? null;
 }
 function addLocalFilePicker(container, onSelect) {
   const wrapper = container.createDiv({ cls: "atb-file-picker" });
@@ -1446,6 +1693,7 @@ function normalizeTaskOrder(order) {
     foreground: Array.isArray(order?.foreground) ? order.foreground : [],
     agent: Array.isArray(order?.agent) ? order.agent : [],
     collab: Array.isArray(order?.collab) ? order.collab : [],
+    review: Array.isArray(order?.review) ? order.review : [],
     inqueue: Array.isArray(order?.inqueue) ? order.inqueue : [],
     pool: Array.isArray(order?.pool) ? order.pool : []
   };
@@ -1465,7 +1713,7 @@ function buildTaskId(filePath, line, raw, categoryTags) {
   return `${filePath}:${line + 1}:${hashString(stableRaw)}`;
 }
 function removeCategoryTags(line, tags) {
-  return removeTag(removeTag(removeTag(removeTag(line, tags.foreground), tags.agent), tags.collab), tags.inqueue);
+  return Object.values(tags).reduce((next, tag) => removeTag(next, tag), line);
 }
 function hashString(value) {
   let hash = 5381;
@@ -1514,6 +1762,9 @@ function extractCollaborators(raw) {
   let match;
   while ((match = re.exec(raw)) !== null) collaborators.push(match[1]);
   return Array.from(new Set(collaborators));
+}
+function mergeCollaborators(...groups) {
+  return Array.from(new Set(groups.flat()));
 }
 function extractLinks(lines, sshRemotePathPrefixes = []) {
   const links = [];

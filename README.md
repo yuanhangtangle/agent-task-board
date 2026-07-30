@@ -1,21 +1,27 @@
 # Agent Task Board
 
-Agent Task Board is an Obsidian plugin for managing TODOs when one person coordinates foreground work, agent work, queued work, collaboration follow-ups, and a general task pool.
+Agent Task Board is an Obsidian plugin for managing TODOs when one person coordinates their own work, active follow-ups, acceptance work, agent work, queued work, and a general task pool.
 
 The plugin scans Markdown tasks from configured files, classifies tasks by tags, and lets you manage the board without constantly opening the source note.
 
 ## Features
 
-- Board columns for foreground tasks, agent tasks, collaboration tasks, queued tasks, and task pool.
-- Configurable category tags, defaulting to `#foreground`, `#agent`, `#collab`, and `#inqueue`.
+- The default six-column workflow is `做 / 推 / 收` over `Agent / 队列 / 任务池`.
+- A settings toggle restores the legacy `前台 / Agent / 协作 / 入队 / 任务池 / 已完成` board.
+- Configurable category tags, defaulting to `#foreground` (做), `#collab` (推), `#review` (收), `#agent`, and `#inqueue`.
 - Priority-based classification when multiple category tags exist on the same task.
 - Path-pattern based Markdown scanning.
 - Quick task creation into a configured inbox file.
 - Edit and delete tasks from the board.
 - Drag tasks within a column or across columns; task order is written back to Markdown.
+- Task cards start as compact one-line summaries showing only the title, active `@person` mentions, and subtask progress; click a card to expand its full details.
 - Complete tasks into a separate done file, including indented child lines.
 - Attachment-style child lines under tasks, with URL extraction and link buttons.
 - Filter by `#tag` and `@person`.
+- Add a Beijing-time task date with `#YYYYMMDD`, then filter the board to today's or overdue tasks.
+- Subtasks also support `@person`; only the current unfinished subtask's mentions contribute to the task card and collaborator filter. After it is completed, the next unfinished subtask's mentions become active. Mentions are preserved when editing the parent task.
+- Subtask checkboxes can be checked or unchecked from both the summary and expanded views.
+- In an expanded card, place the pointer over the current-subtask row and scroll the mouse wheel up or down to browse the previous or next subtask.
 
 ## Install With BRAT
 
@@ -82,9 +88,13 @@ Attach the generated `agent-task-board-<version>.zip` to a GitHub release. For B
 Tasks are normal Markdown checklist items:
 
 ```markdown
-- [ ] Follow up with team #collab @someone
+- [ ] Follow up with team #collab #20260730 @someone
+  - [ ] Prepare the agenda @alice
+  - [ ] Review the draft @bob
   - https://example.com/doc
   - [Issue](https://example.com/issue/1)
 ```
 
-Indented child lines are treated as task attachments and move together with the parent task.
+Indented checklist lines are treated as subtasks; other indented child lines are attachments. Both move together with the parent task.
+
+`#YYYYMMDD` uses the Asia/Shanghai calendar date. “当天任务” matches today's tag, while “过期任务” matches earlier tagged dates; undated tasks are omitted from both filters.
