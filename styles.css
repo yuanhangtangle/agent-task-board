@@ -341,7 +341,8 @@
   right: 8px;
   height: 3px;
   border-radius: 999px;
-  background: var(--interactive-accent);
+  background: #dc2626;
+  box-shadow: 0 0 0 1px color-mix(in oklab, #dc2626 24%, transparent);
   pointer-events: none;
 }
 
@@ -353,7 +354,7 @@
   min-height: 0;
   gap: 0;
   padding: 6px 8px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .atb-card.is-collapsed[draggable="true"] {

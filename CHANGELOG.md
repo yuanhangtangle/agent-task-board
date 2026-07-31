@@ -11,6 +11,7 @@
 - Added automatic navigation to the next subtask after checking the displayed subtask.
 - Preserved expanded cards, attachment panels, subtask panels, and selected subtasks when task line numbers shift after creating a task.
 - Restored drag sorting for collapsed task cards without triggering accidental expansion.
+- Restored the red insertion-position line while dragging collapsed cards.
 
 ## 0.3.0
 
