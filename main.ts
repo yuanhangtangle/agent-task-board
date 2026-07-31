@@ -826,7 +826,9 @@ class AgentTaskBoardView extends ItemView {
       cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isCardExpanded ? "is-expanded" : "is-collapsed"}`,
       attr: { draggable: "true", title: [...tooltipParts, isCardExpanded ? "" : "点击展开"].filter(Boolean).join(" · ") }
     });
+    let suppressCollapsedClickUntil = 0;
     card.addEventListener("dragstart", (ev: DragEvent) => {
+      suppressCollapsedClickUntil = Number.POSITIVE_INFINITY;
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
         filePath: task.file.path,
@@ -843,6 +845,7 @@ class AgentTaskBoardView extends ItemView {
       card.removeClass("is-dragging");
       card.removeClass("insert-before");
       card.removeClass("insert-after");
+      suppressCollapsedClickUntil = Date.now() + 250;
     });
     card.addEventListener("dragover", (ev: DragEvent) => {
       ev.preventDefault();
@@ -903,6 +906,7 @@ class AgentTaskBoardView extends ItemView {
     if (!isCardExpanded) {
       this.renderCollapsedTaskCard(card, task, incompleteSubtasks, taskSequence);
       card.addEventListener("click", (event) => {
+        if (Date.now() < suppressCollapsedClickUntil) return;
         if ((event.target as HTMLElement).closest("button, input, .atb-clickable-chip")) return;
         this.expandedCardIds.add(taskStateKey);
         card.replaceWith(this.renderTaskCard(task, taskSequence));
@@ -1089,7 +1093,7 @@ class AgentTaskBoardView extends ItemView {
   }
 
   private renderCollapsedTaskCard(card: HTMLElement, task: TaskItem, incompleteSubtasks: number, taskSequence: number) {
-    const row = card.createDiv({ cls: "atb-collapsed-row" });
+    const row = card.createDiv({ cls: "atb-collapsed-row", attr: { draggable: "true" } });
     row.createSpan({ cls: "atb-task-sequence", text: `${taskSequence}.` });
     row.createDiv({ cls: "atb-collapsed-title", text: task.text });
 

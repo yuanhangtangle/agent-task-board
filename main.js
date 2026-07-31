@@ -747,7 +747,9 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       cls: `atb-card ${task.category === "completed" ? "is-completed" : ""} ${isCardExpanded ? "is-expanded" : "is-collapsed"}`,
       attr: { draggable: "true", title: [...tooltipParts, isCardExpanded ? "" : "\u70B9\u51FB\u5C55\u5F00"].filter(Boolean).join(" \xB7 ") }
     });
+    let suppressCollapsedClickUntil = 0;
     card.addEventListener("dragstart", (ev) => {
+      suppressCollapsedClickUntil = Number.POSITIVE_INFINITY;
       ev.dataTransfer?.setData("application/json", JSON.stringify({
         id: task.id,
         filePath: task.file.path,
@@ -764,6 +766,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
       card.removeClass("is-dragging");
       card.removeClass("insert-before");
       card.removeClass("insert-after");
+      suppressCollapsedClickUntil = Date.now() + 250;
     });
     card.addEventListener("dragover", (ev) => {
       ev.preventDefault();
@@ -820,6 +823,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     if (!isCardExpanded) {
       this.renderCollapsedTaskCard(card, task, incompleteSubtasks, taskSequence);
       card.addEventListener("click", (event) => {
+        if (Date.now() < suppressCollapsedClickUntil) return;
         if (event.target.closest("button, input, .atb-clickable-chip")) return;
         this.expandedCardIds.add(taskStateKey);
         card.replaceWith(this.renderTaskCard(task, taskSequence));
@@ -994,7 +998,7 @@ var AgentTaskBoardView = class extends import_obsidian.ItemView {
     return card;
   }
   renderCollapsedTaskCard(card, task, incompleteSubtasks, taskSequence) {
-    const row = card.createDiv({ cls: "atb-collapsed-row" });
+    const row = card.createDiv({ cls: "atb-collapsed-row", attr: { draggable: "true" } });
     row.createSpan({ cls: "atb-task-sequence", text: `${taskSequence}.` });
     row.createDiv({ cls: "atb-collapsed-title", text: task.text });
     if (task.collaborators.length > 0) {

@@ -357,7 +357,7 @@
 }
 
 .atb-card.is-collapsed[draggable="true"] {
-  cursor: pointer;
+  cursor: grab;
 }
 
 .atb-collapsed-row {
@@ -366,6 +366,16 @@
   gap: 5px;
   min-width: 0;
   min-height: 20px;
+}
+
+.atb-collapsed-row[draggable="true"] {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-drag: element;
+}
+
+.atb-collapsed-row[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .atb-task-sequence {

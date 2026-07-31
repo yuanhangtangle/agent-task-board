@@ -14,7 +14,7 @@ The plugin scans Markdown tasks from configured files, classifies tasks by tags,
 - Quick task creation into a configured inbox file.
 - Edit and delete tasks from the board.
 - Drag tasks within a column or across columns; task order is written back to Markdown.
-- Task cards start as compact one-line summaries showing an automatically generated per-column sequence number, the title, active `@person` mentions, and subtask progress; click a card to expand its full details.
+- Task cards start as compact one-line summaries showing an automatically generated per-column sequence number, the title, active `@person` mentions, and subtask progress; click a card to expand its full details, or drag the collapsed row to reorder it.
 - Complete tasks into a separate done file, including indented child lines.
 - Attachment-style child lines under tasks, with URL extraction and link buttons.
 - Filter by `#tag` and `@person`.

@@ -10,6 +10,7 @@
 - Added previous/next buttons to the right of the subtask description for browsing subtasks in expanded cards.
 - Added automatic navigation to the next subtask after checking the displayed subtask.
 - Preserved expanded cards, attachment panels, subtask panels, and selected subtasks when task line numbers shift after creating a task.
+- Restored drag sorting for collapsed task cards without triggering accidental expansion.
 
 ## 0.3.0
 
