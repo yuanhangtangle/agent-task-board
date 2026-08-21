@@ -904,7 +904,7 @@ class AgentTaskBoardView extends ItemView {
     });
 
     if (!isCardExpanded) {
-      this.renderCollapsedTaskCard(card, task, incompleteSubtasks, taskSequence);
+      this.renderCollapsedTaskCard(card, task, incompleteSubtasks, taskSequence, taskStateKey);
       card.addEventListener("click", (event) => {
         if (Date.now() < suppressCollapsedClickUntil) return;
         if ((event.target as HTMLElement).closest("button, input, .atb-clickable-chip")) return;
@@ -998,59 +998,7 @@ class AgentTaskBoardView extends ItemView {
       chips.appendChild(createChip(`完成 ${moment(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
     }
 
-    const preferredSubtaskIndex = this.selectedSubtaskIndexes.get(taskStateKey);
-    const currentSubtask = !isSubtasksExpanded
-      ? getCurrentSubtaskSummary(task.subtasks, preferredSubtaskIndex)
-      : null;
-    if (currentSubtask) {
-      const summary = card.createDiv({
-        cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
-        attr: { title: `子任务 ${currentSubtask.index + 1}/${currentSubtask.totalCount}：${currentSubtask.text}` }
-      });
-      const summaryBox = summary.createEl("input", { type: "checkbox" });
-      summaryBox.addClass("atb-current-subtask-box");
-      summaryBox.checked = currentSubtask.completed;
-      summaryBox.disabled = task.category === "completed";
-      summaryBox.addEventListener("click", (event) => event.stopPropagation());
-      summaryBox.addEventListener("change", async () => {
-        const subtask = task.subtasks[currentSubtask.index];
-        if (!subtask || task.category === "completed") return;
-        await this.plugin.toggleSubtask(task, subtask, summaryBox.checked);
-        this.selectedSubtaskIndexes.set(
-          taskStateKey,
-          getSubtaskIndexAfterToggle(currentSubtask.index, summaryBox.checked, currentSubtask.totalCount)
-        );
-        await this.renderTasks();
-      });
-      summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
-      summary.createDiv({ cls: "atb-current-subtask-position", text: `${currentSubtask.index + 1}/${currentSubtask.totalCount}` });
-      const navigation = summary.createDiv({ cls: "atb-current-subtask-navigation" });
-      const previousButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
-      previousButton.setAttribute("aria-label", "上一条子任务");
-      previousButton.setAttribute("title", "上一条子任务");
-      previousButton.disabled = currentSubtask.index === 0;
-      setIcon(previousButton, "chevron-left");
-      previousButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const previousIndex = getAdjacentSubtaskIndex(currentSubtask.index, -1, currentSubtask.totalCount);
-        if (previousIndex === currentSubtask.index) return;
-        this.selectedSubtaskIndexes.set(taskStateKey, previousIndex);
-        card.replaceWith(this.renderTaskCard(task, taskSequence));
-      });
-
-      const nextButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
-      nextButton.setAttribute("aria-label", "下一条子任务");
-      nextButton.setAttribute("title", "下一条子任务");
-      nextButton.disabled = currentSubtask.index === currentSubtask.totalCount - 1;
-      setIcon(nextButton, "chevron-right");
-      nextButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, 1, currentSubtask.totalCount);
-        if (nextIndex === currentSubtask.index) return;
-        this.selectedSubtaskIndexes.set(taskStateKey, nextIndex);
-        card.replaceWith(this.renderTaskCard(task, taskSequence));
-      });
-    }
+    if (!isSubtasksExpanded) this.renderCurrentSubtaskSummary(card, task, taskStateKey, taskSequence);
 
     const footer = card.createDiv({ cls: "atb-card-footer" });
     const source = footer.createDiv({ cls: "atb-source", text: `${task.file.basename}:${task.line + 1}` });
@@ -1092,7 +1040,13 @@ class AgentTaskBoardView extends ItemView {
     return card;
   }
 
-  private renderCollapsedTaskCard(card: HTMLElement, task: TaskItem, incompleteSubtasks: number, taskSequence: number) {
+  private renderCollapsedTaskCard(
+    card: HTMLElement,
+    task: TaskItem,
+    incompleteSubtasks: number,
+    taskSequence: number,
+    taskStateKey: string
+  ) {
     const row = card.createDiv({ cls: "atb-collapsed-row", attr: { draggable: "true" } });
     row.createSpan({ cls: "atb-task-sequence", text: `${taskSequence}.` });
     row.createDiv({ cls: "atb-collapsed-title", text: task.text });
@@ -1119,6 +1073,67 @@ class AgentTaskBoardView extends ItemView {
       });
       progress.setAttribute("title", `子任务完成 ${completedSubtasks}/${task.subtasks.length}`);
     }
+
+    this.renderCurrentSubtaskSummary(card, task, taskStateKey, taskSequence);
+  }
+
+  private renderCurrentSubtaskSummary(
+    card: HTMLElement,
+    task: TaskItem,
+    taskStateKey: string,
+    taskSequence: number
+  ) {
+    const preferredSubtaskIndex = this.selectedSubtaskIndexes.get(taskStateKey);
+    const currentSubtask = getCurrentSubtaskSummary(task.subtasks, preferredSubtaskIndex);
+    if (!currentSubtask) return;
+
+    const summary = card.createDiv({
+      cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
+      attr: { title: `子任务 ${currentSubtask.index + 1}/${currentSubtask.totalCount}：${currentSubtask.text}` }
+    });
+    const summaryBox = summary.createEl("input", { type: "checkbox" });
+    summaryBox.addClass("atb-current-subtask-box");
+    summaryBox.checked = currentSubtask.completed;
+    summaryBox.disabled = task.category === "completed";
+    summaryBox.addEventListener("click", (event) => event.stopPropagation());
+    summaryBox.addEventListener("change", async () => {
+      const subtask = task.subtasks[currentSubtask.index];
+      if (!subtask || task.category === "completed") return;
+      await this.plugin.toggleSubtask(task, subtask, summaryBox.checked);
+      this.selectedSubtaskIndexes.set(
+        taskStateKey,
+        getSubtaskIndexAfterToggle(currentSubtask.index, summaryBox.checked, currentSubtask.totalCount)
+      );
+      await this.renderTasks();
+    });
+    summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
+    summary.createDiv({ cls: "atb-current-subtask-position", text: `${currentSubtask.index + 1}/${currentSubtask.totalCount}` });
+    const navigation = summary.createDiv({ cls: "atb-current-subtask-navigation" });
+    const previousButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
+    previousButton.setAttribute("aria-label", "上一条子任务");
+    previousButton.setAttribute("title", "上一条子任务");
+    previousButton.disabled = currentSubtask.index === 0;
+    setIcon(previousButton, "chevron-left");
+    previousButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const previousIndex = getAdjacentSubtaskIndex(currentSubtask.index, -1, currentSubtask.totalCount);
+      if (previousIndex === currentSubtask.index) return;
+      this.selectedSubtaskIndexes.set(taskStateKey, previousIndex);
+      card.replaceWith(this.renderTaskCard(task, taskSequence));
+    });
+
+    const nextButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
+    nextButton.setAttribute("aria-label", "下一条子任务");
+    nextButton.setAttribute("title", "下一条子任务");
+    nextButton.disabled = currentSubtask.index === currentSubtask.totalCount - 1;
+    setIcon(nextButton, "chevron-right");
+    nextButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, 1, currentSubtask.totalCount);
+      if (nextIndex === currentSubtask.index) return;
+      this.selectedSubtaskIndexes.set(taskStateKey, nextIndex);
+      card.replaceWith(this.renderTaskCard(task, taskSequence));
+    });
   }
 
   private renderSubtaskDetails(card: HTMLElement, task: TaskItem) {
