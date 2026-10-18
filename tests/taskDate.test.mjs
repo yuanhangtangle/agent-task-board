@@ -22,6 +22,7 @@ load(module, module.exports);
 const {
   formatTaskDateKey,
   getBeijingDateKey,
+  getDeadlineKey,
   getTaskDateTag,
   matchesTaskDateFilter
 } = module.exports;
@@ -51,4 +52,34 @@ test("task date filters distinguish today, overdue, future, and undated tasks", 
 
 test("formatTaskDateKey renders the storage tag as an ISO date", () => {
   assert.equal(formatTaskDateKey("20260101"), "2026-01-01");
+});
+
+test("urgent includes overdue and today but excludes future and undated tasks", () => {
+  for (const [date, expected] of [["20261017", true], ["20261018", true], ["20261019", false], [undefined, false]]) {
+    assert.equal(matchesTaskDateFilter(date, "urgent", "20261018"), expected);
+  }
+});
+
+test("week starts Sunday and ends Saturday, including year boundaries", () => {
+  for (const today of ["20261018", "20261024"]) {
+    assert.equal(matchesTaskDateFilter("20261017", "week", today), false);
+    assert.equal(matchesTaskDateFilter("20261018", "week", today), true);
+    assert.equal(matchesTaskDateFilter("20261024", "week", today), true);
+    assert.equal(matchesTaskDateFilter("20261025", "week", today), false);
+  }
+  assert.equal(matchesTaskDateFilter("20251228", "week", "20260101"), true);
+  assert.equal(matchesTaskDateFilter("20260103", "week", "20260101"), true);
+  assert.equal(matchesTaskDateFilter("20260104", "week", "20260101"), false);
+});
+
+test("next seven days include today and cross months and leap days", () => {
+  assert.equal(matchesTaskDateFilter("20240301", "7d", "20240224"), true);
+  assert.equal(matchesTaskDateFilter("20240302", "7d", "20240224"), false);
+  assert.equal(matchesTaskDateFilter("20240223", "7d", "20240224"), false);
+});
+
+test("explicit deadline takes precedence over legacy date tags", () => {
+  assert.equal(getDeadlineKey(new Date("2026-10-18T16:00:00Z"), "20261017"), "20261019");
+  assert.equal(getDeadlineKey(undefined, "20261017"), "20261017");
+  assert.equal(getDeadlineKey(undefined, undefined), undefined);
 });

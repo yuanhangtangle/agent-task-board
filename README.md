@@ -1,27 +1,28 @@
 # Agent Task Board
 
-Agent Task Board is an Obsidian plugin for managing TODOs when one person coordinates their own work, active follow-ups, acceptance work, agent work, queued work, and a general task pool.
+Agent Task Board is an Obsidian plugin for managing your own work, work delegated to people or agents, and work that has not started, with deadline reminders and filters.
 
 The plugin scans Markdown tasks from configured files, classifies tasks by tags, and lets you manage the board without constantly opening the source note.
 
 ## Features
 
-- The default six-column workflow is `做 / 推 / 收` over `Agent / 队列 / 任务池`.
-- A settings toggle restores the legacy `前台 / Agent / 协作 / 入队 / 任务池 / 已完成` board.
-- Configurable category tags, defaulting to `#foreground` (做), `#collab` (推), `#review` (收), `#agent`, and `#inqueue`.
+- Four groups: `我做 / 别人做 / agent做 / 还没有做`.
+- Configurable category tags: `#foreground`, `#collab`, and `#agent`. Untagged and legacy `#inqueue` tasks appear in `还没有做`; legacy `#review` tasks appear in `别人做`. Existing source files do not require bulk migration.
 - Priority-based classification when multiple category tags exist on the same task.
 - Path-pattern based Markdown scanning.
 - Quick task creation into a configured inbox file.
 - Edit and delete tasks from the board.
 - Drag tasks within a column or across columns; task order is written back to Markdown.
-- Task cards start as compact summaries showing an automatically generated per-column sequence number, the title, active `@person` mentions, and subtask progress. Cards with subtasks keep the current subtask visible while collapsed, including its checkbox and previous/next controls; click elsewhere on a card to expand its full details, or drag the collapsed row to reorder it.
+- Collapsed cards show title, deadline, people, and tags in one horizontally scrolling row. Category tags are hidden from cards. Expand a card to see all subtasks and attachments directly, without extra toggle buttons or a source-file row. Check or uncheck any subtask independently. Click the expanded title row to collapse the card; the checkbox and edit button keep their own actions.
+- Create tasks with a group's plus button to place them in that group. The global plus button and creation command default to `我做`; the creation dialog has no category selector.
 - Complete tasks into a separate done file, including indented child lines.
 - Attachment-style child lines under tasks, with URL extraction and link buttons.
 - Filter by `#tag` and `@person`.
-- Add a Beijing-time task date with `#YYYYMMDD`, then filter the board to today's or overdue tasks.
-- Subtasks also support `@person`; only the current unfinished subtask's mentions contribute to the task card and collaborator filter. After it is completed, the next unfinished subtask's mentions become active. Mentions are preserved when editing the parent task.
-- Subtask checkboxes can be checked or unchecked from both the summary and expanded views.
-- In an expanded card, use the previous/next buttons in the current-subtask row to browse subtasks. Checking the displayed subtask automatically advances to the next one.
+- Enter tags, people, and deadlines in the first task field, e.g. `Ship release #project @alice #20261018` or `Ship release @alice due::2026-10-18`. There is no separate tag field.
+- Deadlines support `#YYYYMMDD`, `due::YYYY-MM-DD`, and `📅 YYYY-MM-DD`. An explicit deadline takes precedence over a date tag. Dates use Asia/Shanghai.
+- Overdue cards have red accents; cards due today have orange accents, including when collapsed. Reminders refresh across midnight.
+- Filter by `最紧急` (overdue plus today), `今天到期`, `已逾期`, `本周到期` (Sunday through Saturday), or `未来7天` (today through six days from today). Date-filtered results show earlier deadlines first; unfiltered tasks retain manual order.
+- All unfinished subtasks' `@person` mentions contribute to the card and person filter. Mentions are preserved when editing the parent task.
 
 ## Install With BRAT
 
@@ -97,4 +98,4 @@ Tasks are normal Markdown checklist items:
 
 Indented checklist lines are treated as subtasks; other indented child lines are attachments. Both move together with the parent task.
 
-`#YYYYMMDD` uses the Asia/Shanghai calendar date. “当天任务” matches today's tag, while “过期任务” matches earlier tagged dates; undated tasks are omitted from both filters.
+Undated tasks are omitted from deadline filters. Click an active date filter again, or clear the filters, to return to all tasks. Completed tasks continue to be archived in the configured done file.

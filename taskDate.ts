@@ -1,4 +1,4 @@
-export type TaskDateFilter = "all" | "today" | "overdue";
+export type TaskDateFilter = "all" | "today" | "overdue" | "urgent" | "week" | "7d";
 
 const BEIJING_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "Asia/Shanghai",
@@ -23,7 +23,20 @@ export function getBeijingDateKey(now = new Date()): string {
 export function matchesTaskDateFilter(taskDate: string | undefined, filter: TaskDateFilter, today: string): boolean {
   if (filter === "all") return true;
   if (!taskDate) return false;
-  return filter === "today" ? taskDate === today : taskDate < today;
+  if (filter === "today") return taskDate === today;
+  if (filter === "overdue") return taskDate < today;
+  if (filter === "urgent") return taskDate <= today;
+  const date = new Date(`${formatTaskDateKey(today)}T00:00:00Z`);
+  const start = new Date(date);
+  if (filter === "week") start.setUTCDate(date.getUTCDate() - date.getUTCDay());
+  const end = new Date(start);
+  end.setUTCDate(start.getUTCDate() + 6);
+  const key = (value: Date) => value.toISOString().slice(0, 10).replace(/-/g, "");
+  return taskDate >= key(start) && taskDate <= key(end);
+}
+
+export function getDeadlineKey(due: Date | undefined, taskDate: string | undefined): string | undefined {
+  return due ? getBeijingDateKey(due) : taskDate;
 }
 
 export function formatTaskDateKey(taskDate: string): string {

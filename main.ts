@@ -1,7 +1,6 @@
 import {
   App,
   ItemView,
-  MarkdownView,
   Modal,
   Notice,
   Plugin,
@@ -13,15 +12,11 @@ import {
   moment
 } from "obsidian";
 import { setCheckboxCompletion, stripCompletionMetadata } from "./completionMetadata";
-import {
-  getAdjacentSubtaskIndex,
-  getCurrentSubtaskSummary,
-  getSubtaskIndexAfterToggle
-} from "./subtaskSummary";
 import { getTaskViewStateKey } from "./taskViewState";
 import {
   formatTaskDateKey,
   getBeijingDateKey,
+  getDeadlineKey,
   getTaskDateTag,
   matchesTaskDateFilter,
   type TaskDateFilter
@@ -137,22 +132,12 @@ interface TaskLink {
 }
 
 const MODERN_CATEGORY_LABELS: Record<BoardCategory, string> = {
-  foreground: "做",
-  collab: "推",
-  review: "收",
-  agent: "Agent",
-  inqueue: "队列",
-  pool: "任务池",
-  completed: "已完成"
-};
-
-const LEGACY_CATEGORY_LABELS: Record<BoardCategory, string> = {
-  foreground: "前台任务",
-  agent: "Agent 任务",
-  collab: "协作任务",
-  review: "协作任务",
-  inqueue: "入队任务",
-  pool: "任务池",
+  foreground: "我做",
+  collab: "别人做",
+  review: "别人做",
+  agent: "agent做",
+  inqueue: "还没有做",
+  pool: "还没有做",
   completed: "已完成"
 };
 
@@ -183,6 +168,14 @@ export default class AgentTaskBoardPlugin extends Plugin {
 
     this.registerEvent(this.app.metadataCache.on("changed", () => this.refreshView()));
     this.registerEvent(this.app.vault.on("modify", () => this.refreshView()));
+    let currentDate = getBeijingDateKey();
+    this.registerInterval(window.setInterval(() => {
+      const nextDate = getBeijingDateKey();
+      if (nextDate !== currentDate) {
+        currentDate = nextDate;
+        this.refreshView();
+      }
+    }, 60_000));
   }
 
   async activateView() {
@@ -224,7 +217,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
   }
 
   getCategoryLabel(category: BoardCategory): string {
-    return (this.settings.useModernWorkflow ? MODERN_CATEGORY_LABELS : LEGACY_CATEGORY_LABELS)[category];
+    return MODERN_CATEGORY_LABELS[category];
   }
 
   async collectTasks(): Promise<TaskItem[]> {
@@ -251,7 +244,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
         const originalBlock = lines.slice(i, blockRange.end + 1);
         const { subtasks, attachmentLines } = splitTaskBlockChildren(originalBlock);
         const tags = extractTags(raw);
-        const collaborators = mergeCollaborators(extractCollaborators(raw), getActiveSubtask(subtasks)?.collaborators ?? []);
+        const collaborators = mergeCollaborators(extractCollaborators(raw), subtasks.filter((subtask) => !subtask.completed).flatMap((subtask) => subtask.collaborators));
         const category = classifyTask(raw, categoryTags, this.settings.useModernWorkflow);
         const created = extractDate(raw, "created", ["📋"]);
         const start = extractDate(raw, "start", ["🛫", "⏳"]);
@@ -366,9 +359,9 @@ export default class AgentTaskBoardPlugin extends Plugin {
     new Notice("已创建任务");
   }
 
-  async updateTask(task: TaskItem, rawText: string, subtaskText: string, attachmentText: string, tagText = "") {
+  async updateTask(task: TaskItem, rawText: string, subtaskText: string, attachmentText: string) {
     const categoryTags = this.getCategoryTags();
-    const nextRaw = replaceTaskTags(rawText, tagText, categoryTags).trim();
+    const nextRaw = rawText.trim();
     if (!nextRaw) {
       new Notice("任务内容不能为空");
       return;
@@ -539,23 +532,17 @@ export default class AgentTaskBoardPlugin extends Plugin {
         return lines.join("\n");
       });
     } else {
-      let movedBlock: string[] | null = null;
+      const sourceLines = (await this.app.vault.read(task.file)).split(/\r?\n/);
+      const sourceIdx = findCurrentTaskLine(sourceLines, task);
+      if (sourceIdx < 0) {
+        new Notice("任务源行已变化，未移动");
+        return;
+      }
+      const sourceRange = getTaskBlockRange(sourceLines, sourceIdx);
+      const sourceBlock = sourceLines.slice(sourceIdx, sourceRange.end + 1);
+      const blockToInsert = rewriteBlock(sourceBlock);
 
-      await this.app.vault.process(task.file, (data) => {
-        const lines = data.split(/\r?\n/);
-        const sourceIdx = findCurrentTaskLine(lines, task);
-        if (sourceIdx < 0) {
-          new Notice("任务源行已变化，未移动");
-          return data;
-        }
-        const sourceRange = getTaskBlockRange(lines, sourceIdx);
-        movedBlock = rewriteBlock(lines.splice(sourceIdx, sourceRange.end - sourceIdx + 1));
-        return lines.join("\n");
-      });
-
-      if (!movedBlock) return;
-      const blockToInsert = movedBlock as string[];
-
+      // Keep the source intact until the destination write succeeds.
       await this.app.vault.process(targetTask.file, (data) => {
         const lines = data.split(/\r?\n/);
         const targetIdx = findCurrentTaskLine(lines, targetTask);
@@ -566,6 +553,16 @@ export default class AgentTaskBoardPlugin extends Plugin {
         const targetRange = getTaskBlockRange(lines, targetIdx);
         const insertIdx = position === "before" ? targetIdx : targetRange.end + 1;
         lines.splice(insertIdx, 0, ...blockToInsert);
+        return lines.join("\n");
+      });
+      await this.app.vault.process(task.file, (data) => {
+        const lines = data.split(/\r?\n/);
+        const currentIdx = findCurrentTaskLine(lines, task);
+        const currentRange = currentIdx >= 0 ? getTaskBlockRange(lines, currentIdx) : null;
+        if (!currentRange || lines.slice(currentIdx, currentRange.end + 1).join("\n") !== sourceBlock.join("\n")) {
+          throw new Error("目标已写入，但源任务发生变化；已保留源任务，请检查重复项");
+        }
+        lines.splice(currentIdx, currentRange.end - currentIdx + 1);
         return lines.join("\n");
       });
     }
@@ -676,9 +673,6 @@ class AgentTaskBoardView extends ItemView {
   private taskDateFilter: TaskDateFilter = "all";
   private completedFilter: CompletedFilter = "7d";
   private expandedCardIds = new Set<string>();
-  private expandedAttachmentIds = new Set<string>();
-  private expandedSubtaskIds = new Set<string>();
-  private selectedSubtaskIndexes = new Map<string, number>();
 
   constructor(leaf: WorkspaceLeaf, plugin: AgentTaskBoardPlugin) {
     super(leaf);
@@ -696,13 +690,13 @@ class AgentTaskBoardView extends ItemView {
     const root = this.containerEl;
     root.empty();
     root.toggleClass("atb-compact", this.plugin.settings.density === "compact");
-    root.toggleClass("atb-modern-workflow", this.plugin.settings.useModernWorkflow);
+    root.addClass("atb-modern-workflow");
 
     const outer = root.createDiv({ cls: "atb-outer" });
     this.renderTopbar(outer);
 
     let tasks = await this.plugin.collectTasks();
-    let completedTasks = this.plugin.settings.useModernWorkflow ? [] : await this.plugin.collectCompletedTasks();
+    let completedTasks: TaskItem[] = [];
     tasks.sort(compareTasks);
     completedTasks.sort(compareCompletedTasks);
 
@@ -818,8 +812,6 @@ class AgentTaskBoardView extends ItemView {
     ].filter(Boolean);
 
     const isCardExpanded = this.expandedCardIds.has(taskStateKey);
-    const isAttachmentsExpanded = this.expandedAttachmentIds.has(taskStateKey);
-    const isSubtasksExpanded = this.expandedSubtaskIds.has(taskStateKey);
     const incompleteSubtasks = task.subtasks.filter((subtask) => !subtask.completed).length;
     const isCompletionBlocked = task.category !== "completed" && incompleteSubtasks > 0;
     const card = createDiv({
@@ -827,6 +819,12 @@ class AgentTaskBoardView extends ItemView {
       attr: { draggable: "true", title: [...tooltipParts, isCardExpanded ? "" : "点击展开"].filter(Boolean).join(" · ") }
     });
     let suppressCollapsedClickUntil = 0;
+    const deadline = getDeadlineKey(task.due, task.taskDate);
+    const today = getBeijingDateKey();
+    if (task.category !== "completed" && deadline) {
+      card.toggleClass("is-overdue", deadline < today);
+      card.toggleClass("is-due-today", deadline === today);
+    }
     card.addEventListener("dragstart", (ev: DragEvent) => {
       suppressCollapsedClickUntil = Number.POSITIVE_INFINITY;
       ev.dataTransfer?.setData("application/json", JSON.stringify({
@@ -915,6 +913,22 @@ class AgentTaskBoardView extends ItemView {
     }
 
     const top = card.createDiv({ cls: "atb-card-top" });
+    top.setAttribute("tabindex", "0");
+    top.setAttribute("title", "点击折叠任务");
+    const collapseCard = () => {
+      this.expandedCardIds.delete(taskStateKey);
+      card.replaceWith(this.renderTaskCard(task, taskSequence));
+    };
+    top.addEventListener("click", (event) => {
+      if (Date.now() < suppressCollapsedClickUntil) return;
+      if ((event.target as HTMLElement).closest("button, input")) return;
+      collapseCard();
+    });
+    top.addEventListener("keydown", (event) => {
+      if (event.target !== top || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      collapseCard();
+    });
     top.createSpan({ cls: "atb-task-sequence", text: `${taskSequence}.` });
     const checkbox = top.createEl("input", { type: "checkbox" });
     checkbox.addClass("atb-done-box");
@@ -928,16 +942,7 @@ class AgentTaskBoardView extends ItemView {
       await this.renderTasks();
     });
 
-    const title = top.createDiv({ cls: "atb-task-title", text: task.text });
-    const collapseButton = top.createEl("button", { cls: "atb-card-edit atb-card-collapse" });
-    collapseButton.setAttribute("aria-label", "折叠任务");
-    collapseButton.setAttribute("title", "折叠任务");
-    setIcon(collapseButton, "chevron-up");
-    collapseButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      this.expandedCardIds.delete(taskStateKey);
-      card.replaceWith(this.renderTaskCard(task, taskSequence));
-    });
+    top.createDiv({ cls: "atb-task-title", text: task.text });
     const editButton = top.createEl("button", { cls: "atb-card-edit" });
     editButton.setAttribute("aria-label", "编辑任务");
     editButton.setAttribute("title", "编辑任务");
@@ -947,7 +952,8 @@ class AgentTaskBoardView extends ItemView {
       new EditTaskModal(this.app, this.plugin, task).open();
     });
 
-    const chips = card.createDiv({ cls: "atb-chips" });
+    const chips = card.createDiv({ cls: "atb-chips atb-card-toolbar" });
+    this.renderDeadline(chips, task);
     if (task.collaborators.length > 0) {
       for (const collaborator of task.collaborators) {
         const chip = createChip(`@${collaborator}`, "atb-chip-collab");
@@ -961,7 +967,7 @@ class AgentTaskBoardView extends ItemView {
       }
     }
     if (task.tags.length > 0) {
-      for (const tag of task.tags) {
+      for (const tag of getEditableTaskTags(task, this.plugin.getCategoryTags())) {
         if (tag === task.taskDate) continue;
         const chip = createChip(`#${tag}`, "atb-chip-tag");
         chip.setAttribute("data-tag-color", String(getTagColorIndex(tag)));
@@ -974,69 +980,13 @@ class AgentTaskBoardView extends ItemView {
         chips.appendChild(chip);
       }
     }
-    if (task.taskDate) {
-      const today = getBeijingDateKey();
-      const state = task.taskDate === today ? "今天" : task.taskDate < today ? "逾期" : "";
-      const chip = createChip(`#${task.taskDate}${state ? ` · ${state}` : ""}`, "atb-chip-date");
-      if (task.taskDate < today) chip.addClass("atb-chip-danger");
-      chip.addClass("atb-clickable-chip");
-      chip.setAttribute("title", `北京时间任务日期 ${formatTaskDateKey(task.taskDate)}；点击筛选该日期`);
-      chip.addEventListener("click", (event) => {
-        event.stopPropagation();
-        this.addFilterValue(this.filterTags, task.taskDate!);
-      });
-      chips.appendChild(chip);
-    }
-    if (task.due) {
-      const today = moment().startOf("day");
-      const due = moment(task.due).startOf("day");
-      const diff = due.diff(today, "days");
-      const chip = createChip(diff < 0 ? `逾期${Math.abs(diff)}天` : diff === 0 ? "今天到期" : `${diff}天后到期`, diff <= 0 ? "atb-chip-danger" : "atb-chip-date");
-      chips.appendChild(chip);
-    }
     if (task.completed) {
       chips.appendChild(createChip(`完成 ${moment(task.completed).format(this.plugin.settings.dateFormat)}`, "atb-chip-date"));
     }
 
-    if (!isSubtasksExpanded) this.renderCurrentSubtaskSummary(card, task, taskStateKey, taskSequence);
-
-    const footer = card.createDiv({ cls: "atb-card-footer" });
-    const source = footer.createDiv({ cls: "atb-source", text: `${task.file.basename}:${task.line + 1}` });
-    source.setAttribute("title", "打开源文件");
-    source.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await this.openTaskSource(task);
-    });
-
-    if (task.subtasks.length > 0) {
-      const completedSubtasks = task.subtasks.length - incompleteSubtasks;
-      const subtaskIndicator = footer.createEl("button", {
-        cls: `atb-subtask-indicator ${incompleteSubtasks === 0 ? "is-complete" : ""}`,
-        text: `子任务 ${completedSubtasks}/${task.subtasks.length}`
-      });
-      subtaskIndicator.setAttribute("title", isSubtasksExpanded ? "收起子任务" : "展开子任务");
-      subtaskIndicator.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (this.expandedSubtaskIds.has(taskStateKey)) this.expandedSubtaskIds.delete(taskStateKey);
-        else this.expandedSubtaskIds.add(taskStateKey);
-        card.replaceWith(this.renderTaskCard(task, taskSequence));
-      });
-    }
-
-    const linkIndicator = footer.createEl("button", {
-      cls: `atb-link-indicator ${task.links.length === 0 ? "is-empty" : ""}`,
-      text: `附件 ${task.links.length}`
-    });
-    linkIndicator.setAttribute("title", isAttachmentsExpanded ? "收起附件" : "展开附件");
-    linkIndicator.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (this.expandedAttachmentIds.has(taskStateKey)) this.expandedAttachmentIds.delete(taskStateKey);
-      else this.expandedAttachmentIds.add(taskStateKey);
-      card.replaceWith(this.renderTaskCard(task, taskSequence));
-    });
-
-    if (isSubtasksExpanded) this.renderSubtaskDetails(card, task);
-    if (isAttachmentsExpanded) this.renderTaskDetails(card, task);
+    if (chips.childElementCount === 0) chips.remove();
+    if (task.subtasks.length > 0) this.renderSubtaskDetails(card, task);
+    if (task.links.length > 0) this.renderTaskDetails(card, task);
     return card;
   }
 
@@ -1047,12 +997,18 @@ class AgentTaskBoardView extends ItemView {
     taskSequence: number,
     taskStateKey: string
   ) {
-    const row = card.createDiv({ cls: "atb-collapsed-row", attr: { draggable: "true" } });
+    const row = card.createDiv({ cls: "atb-collapsed-row", attr: { draggable: "true", tabindex: "0" } });
     row.createSpan({ cls: "atb-task-sequence", text: `${taskSequence}.` });
     row.createDiv({ cls: "atb-collapsed-title", text: task.text });
 
+    const metadata = row.createDiv({
+      cls: "atb-collapsed-metadata",
+      attr: { tabindex: "0", "aria-label": "截止日期、负责人和标签", draggable: "false" }
+    });
+    metadata.addEventListener("click", (event) => event.stopPropagation());
+    metadata.addEventListener("dragstart", (event) => event.preventDefault());
+    this.renderDeadline(metadata, task);
     if (task.collaborators.length > 0) {
-      const mentions = row.createDiv({ cls: "atb-collapsed-mentions" });
       for (const collaborator of task.collaborators) {
         const chip = createChip(`@${collaborator}`, "atb-chip-collab");
         chip.addClass("atb-clickable-chip");
@@ -1061,10 +1017,22 @@ class AgentTaskBoardView extends ItemView {
           event.stopPropagation();
           this.addFilterValue(this.filterCollabs, collaborator);
         });
-        mentions.appendChild(chip);
+        metadata.appendChild(chip);
       }
     }
-
+    for (const tag of getEditableTaskTags(task, this.plugin.getCategoryTags())) {
+      if (tag === task.taskDate) continue;
+      const chip = createChip(`#${tag}`, "atb-chip-tag");
+      chip.setAttribute("data-tag-color", String(getTagColorIndex(tag)));
+      chip.addClass("atb-clickable-chip");
+      chip.setAttribute("title", `筛选 #${tag}`);
+      chip.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.addFilterValue(this.filterTags, tag);
+      });
+      metadata.appendChild(chip);
+    }
+    if (!metadata.hasChildNodes()) metadata.remove();
     if (task.subtasks.length > 0) {
       const completedSubtasks = task.subtasks.length - incompleteSubtasks;
       const progress = row.createDiv({
@@ -1073,67 +1041,16 @@ class AgentTaskBoardView extends ItemView {
       });
       progress.setAttribute("title", `子任务完成 ${completedSubtasks}/${task.subtasks.length}`);
     }
-
-    this.renderCurrentSubtaskSummary(card, task, taskStateKey, taskSequence);
   }
 
-  private renderCurrentSubtaskSummary(
-    card: HTMLElement,
-    task: TaskItem,
-    taskStateKey: string,
-    taskSequence: number
-  ) {
-    const preferredSubtaskIndex = this.selectedSubtaskIndexes.get(taskStateKey);
-    const currentSubtask = getCurrentSubtaskSummary(task.subtasks, preferredSubtaskIndex);
-    if (!currentSubtask) return;
-
-    const summary = card.createDiv({
-      cls: `atb-current-subtask ${currentSubtask.completed ? "is-complete" : ""}`,
-      attr: { title: `子任务 ${currentSubtask.index + 1}/${currentSubtask.totalCount}：${currentSubtask.text}` }
-    });
-    const summaryBox = summary.createEl("input", { type: "checkbox" });
-    summaryBox.addClass("atb-current-subtask-box");
-    summaryBox.checked = currentSubtask.completed;
-    summaryBox.disabled = task.category === "completed";
-    summaryBox.addEventListener("click", (event) => event.stopPropagation());
-    summaryBox.addEventListener("change", async () => {
-      const subtask = task.subtasks[currentSubtask.index];
-      if (!subtask || task.category === "completed") return;
-      await this.plugin.toggleSubtask(task, subtask, summaryBox.checked);
-      this.selectedSubtaskIndexes.set(
-        taskStateKey,
-        getSubtaskIndexAfterToggle(currentSubtask.index, summaryBox.checked, currentSubtask.totalCount)
-      );
-      await this.renderTasks();
-    });
-    summary.createDiv({ cls: "atb-current-subtask-title", text: currentSubtask.text });
-    summary.createDiv({ cls: "atb-current-subtask-position", text: `${currentSubtask.index + 1}/${currentSubtask.totalCount}` });
-    const navigation = summary.createDiv({ cls: "atb-current-subtask-navigation" });
-    const previousButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
-    previousButton.setAttribute("aria-label", "上一条子任务");
-    previousButton.setAttribute("title", "上一条子任务");
-    previousButton.disabled = currentSubtask.index === 0;
-    setIcon(previousButton, "chevron-left");
-    previousButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const previousIndex = getAdjacentSubtaskIndex(currentSubtask.index, -1, currentSubtask.totalCount);
-      if (previousIndex === currentSubtask.index) return;
-      this.selectedSubtaskIndexes.set(taskStateKey, previousIndex);
-      card.replaceWith(this.renderTaskCard(task, taskSequence));
-    });
-
-    const nextButton = navigation.createEl("button", { cls: "atb-subtask-nav-button" });
-    nextButton.setAttribute("aria-label", "下一条子任务");
-    nextButton.setAttribute("title", "下一条子任务");
-    nextButton.disabled = currentSubtask.index === currentSubtask.totalCount - 1;
-    setIcon(nextButton, "chevron-right");
-    nextButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const nextIndex = getAdjacentSubtaskIndex(currentSubtask.index, 1, currentSubtask.totalCount);
-      if (nextIndex === currentSubtask.index) return;
-      this.selectedSubtaskIndexes.set(taskStateKey, nextIndex);
-      card.replaceWith(this.renderTaskCard(task, taskSequence));
-    });
+  private renderDeadline(container: HTMLElement, task: TaskItem) {
+    const deadline = getDeadlineKey(task.due, task.taskDate);
+    if (!deadline) return;
+    const today = getBeijingDateKey();
+    const state = deadline < today ? "已逾期" : deadline === today ? "今天到期" : "截止";
+    const chip = createChip(`${state} ${formatTaskDateKey(deadline)}`, deadline < today ? "atb-chip-danger" : "atb-chip-date");
+    chip.setAttribute("title", "截止日期（北京时间）");
+    container.appendChild(chip);
   }
 
   private renderSubtaskDetails(card: HTMLElement, task: TaskItem) {
@@ -1194,17 +1111,8 @@ class AgentTaskBoardView extends ItemView {
 
   }
 
-  private async openTaskSource(task: TaskItem) {
-    const leaf = this.app.workspace.getLeaf(true);
-    await leaf.openFile(task.file);
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!view) return;
-    view.editor.setCursor({ line: task.line, ch: 0 });
-    view.editor.scrollIntoView({ from: { line: task.line, ch: 0 }, to: { line: task.line + 1, ch: 0 } }, true);
-  }
-
   private renderFilterToolbar(container: HTMLElement, allTasks: TaskItem[]) {
-    const tags = Array.from(new Set(allTasks.flatMap((task) => task.tags))).sort();
+    const tags = Array.from(new Set(allTasks.flatMap((task) => getEditableTaskTags(task, this.plugin.getCategoryTags())))).sort();
     const collaborators = Array.from(new Set(allTasks.flatMap((task) => task.collaborators))).sort();
 
     const toolbar = container.createDiv({ cls: "atb-filter-toolbar" });
@@ -1230,12 +1138,17 @@ class AgentTaskBoardView extends ItemView {
     for (const collaborator of this.excludeCollabs) this.renderFilterChip(toolbar, collaborator, "@", true, this.filterCollabs, this.excludeCollabs, "collab");
 
     for (const option of [
-      { value: "today" as const, label: "当天任务" },
-      { value: "overdue" as const, label: "过期任务" }
+      { value: "urgent" as const, label: "最紧急" },
+      { value: "today" as const, label: "今天到期" },
+      { value: "overdue" as const, label: "已逾期" },
+      { value: "week" as const, label: "本周到期" },
+      { value: "7d" as const, label: "未来7天" }
     ]) {
       const button = toolbar.createEl("button", { cls: "atb-date-filter", text: option.label });
       button.toggleClass("is-active", this.taskDateFilter === option.value);
+      button.setAttribute("aria-pressed", String(this.taskDateFilter === option.value));
       button.setAttribute("title", `${option.label}（北京时间 ${formatTaskDateKey(getBeijingDateKey())}）`);
+      if (option.value === "urgent") button.setAttribute("title", "已逾期 + 今天到期；按截止日期从早到晚排列（北京时间）");
       button.addEventListener("click", () => {
         this.taskDateFilter = this.taskDateFilter === option.value ? "all" : option.value;
         void this.renderTasks();
@@ -1250,19 +1163,6 @@ class AgentTaskBoardView extends ItemView {
         this.filterCollabs = [];
         this.excludeCollabs = [];
         this.taskDateFilter = "all";
-        void this.renderTasks();
-      });
-    }
-
-    if (!this.plugin.settings.useModernWorkflow) {
-      const completedSelect = toolbar.createEl("select", { cls: "atb-completed-filter" });
-      completedSelect.createEl("option", { value: "today", text: "完成：今天" });
-      completedSelect.createEl("option", { value: "7d", text: "完成：7天" });
-      completedSelect.createEl("option", { value: "30d", text: "完成：30天" });
-      completedSelect.createEl("option", { value: "all", text: "完成：全部" });
-      completedSelect.value = this.completedFilter;
-      completedSelect.addEventListener("change", () => {
-        this.completedFilter = completedSelect.value as CompletedFilter;
         void this.renderTasks();
       });
     }
@@ -1412,7 +1312,9 @@ class AgentTaskBoardView extends ItemView {
   private applyTaskDateFilter(tasks: TaskItem[]) {
     if (this.taskDateFilter === "all") return tasks;
     const today = getBeijingDateKey();
-    return tasks.filter((task) => matchesTaskDateFilter(task.taskDate, this.taskDateFilter, today));
+    return tasks
+      .filter((task) => matchesTaskDateFilter(getDeadlineKey(task.due, task.taskDate), this.taskDateFilter, today))
+      .sort((a, b) => getDeadlineKey(a.due, a.taskDate)!.localeCompare(getDeadlineKey(b.due, b.taskDate)!) || compareTasks(a, b));
   }
 }
 
@@ -1421,7 +1323,6 @@ class CreateTaskModal extends Modal {
   initialCategory: Category;
   taskText = "";
   subtaskText = "";
-  tagText = "";
   attachmentText = "";
   category: Category;
   targetFile: string;
@@ -1445,7 +1346,7 @@ class CreateTaskModal extends Modal {
       .addTextArea((text) => {
         text.inputEl.rows = 4;
         text.setValue(this.taskText);
-        text.setPlaceholder("写下要处理的 TODO，可包含 #tag 和 @who");
+        text.setPlaceholder("任务 #标签 @负责人 #20261018 或 due::2026-10-18");
         text.onChange((value) => this.taskText = value);
         window.setTimeout(() => text.inputEl.focus(), 50);
       });
@@ -1458,15 +1359,6 @@ class CreateTaskModal extends Modal {
         text.setValue(this.subtaskText);
         text.setPlaceholder("调研方案\n实现写回\n验证归档");
         text.onChange((value) => this.subtaskText = value);
-      });
-
-    new Setting(contentEl)
-      .setName("标签")
-      .setDesc("空格分隔，支持写 #tag；#YYYYMMDD 表示北京时间任务日期，分类标签由面板自动维护。")
-      .addText((text) => {
-        text.setValue(this.tagText);
-        text.setPlaceholder("#20260730 #important");
-        text.onChange((value) => this.tagText = value);
       });
 
     new Setting(contentEl)
@@ -1485,30 +1377,6 @@ class CreateTaskModal extends Modal {
     });
 
     new Setting(contentEl)
-      .setName("分类")
-      .addDropdown((dropdown) => {
-        if (this.plugin.settings.useModernWorkflow) {
-          dropdown
-            .addOption("foreground", "做")
-            .addOption("collab", "推")
-            .addOption("review", "收")
-            .addOption("agent", "Agent")
-            .addOption("inqueue", "队列")
-            .addOption("pool", "任务池");
-        } else {
-          dropdown
-            .addOption("foreground", "前台任务")
-            .addOption("agent", "Agent 任务")
-            .addOption("collab", "协作任务")
-            .addOption("inqueue", "入队任务")
-            .addOption("pool", "任务池");
-        }
-        dropdown
-          .setValue(this.category)
-          .onChange((value: Category) => this.category = value);
-      });
-
-    new Setting(contentEl)
       .setName("目标文件")
       .addText((text) => {
         text.setValue(this.targetFile);
@@ -1518,7 +1386,7 @@ class CreateTaskModal extends Modal {
     const buttons = contentEl.createDiv({ cls: "atb-modal-buttons" });
     const createButton = buttons.createEl("button", { cls: "mod-cta", text: "创建" });
     createButton.addEventListener("click", async () => {
-      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.subtaskText, this.attachmentText, this.tagText);
+      await this.plugin.createTask(this.taskText, this.category, this.targetFile, this.subtaskText, this.attachmentText);
       this.close();
     });
     const cancelButton = buttons.createEl("button", { text: "取消" });
@@ -1535,7 +1403,6 @@ class EditTaskModal extends Modal {
   task: TaskItem;
   rawText: string;
   subtaskText: string;
-  tagText: string;
   attachmentText: string;
 
   constructor(app: App, plugin: AgentTaskBoardPlugin, task: TaskItem) {
@@ -1544,7 +1411,6 @@ class EditTaskModal extends Modal {
     this.task = task;
     this.rawText = task.rawText;
     this.subtaskText = serializeSubtasksForEdit(task.subtasks);
-    this.tagText = getEditableTaskTags(task, plugin.getCategoryTags()).map((tag) => `#${tag}`).join(" ");
     this.attachmentText = task.attachmentLines.map((line) => cleanupAttachmentLine(line)).filter(Boolean).join("\n");
   }
 
@@ -1559,6 +1425,7 @@ class EditTaskModal extends Modal {
       .addTextArea((text) => {
         text.inputEl.rows = 4;
         text.setValue(this.rawText);
+        text.setPlaceholder("任务 #标签 @负责人 #20261018 或 due::2026-10-18");
         text.onChange((value) => this.rawText = value);
         window.setTimeout(() => text.inputEl.focus(), 50);
       });
@@ -1570,15 +1437,6 @@ class EditTaskModal extends Modal {
         text.inputEl.rows = 6;
         text.setValue(this.subtaskText);
         text.onChange((value) => this.subtaskText = value);
-      });
-
-    new Setting(contentEl)
-      .setName("标签")
-      .setDesc("空格分隔，支持写 #tag；#YYYYMMDD 表示北京时间任务日期，保存时替换任务里的普通标签。")
-      .addText((text) => {
-        text.setValue(this.tagText);
-        text.setPlaceholder("#20260730 #important");
-        text.onChange((value) => this.tagText = value);
       });
 
     new Setting(contentEl)
@@ -1607,7 +1465,7 @@ class EditTaskModal extends Modal {
     const actionButtons = buttons.createDiv({ cls: "atb-modal-action-buttons" });
     const saveButton = actionButtons.createEl("button", { cls: "mod-cta", text: "保存" });
     saveButton.addEventListener("click", async () => {
-      await this.plugin.updateTask(this.task, this.rawText, this.subtaskText, this.attachmentText, this.tagText);
+      await this.plugin.updateTask(this.task, this.rawText, this.subtaskText, this.attachmentText);
       this.close();
     });
     const cancelButton = actionButtons.createEl("button", { text: "取消" });
@@ -1631,17 +1489,6 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Agent Task Board 设置" });
-
-    new Setting(containerEl)
-      .setName("新版工作流：做 / 推 / 收")
-      .setDesc("开启后使用“做、推、收 / Agent、队列、任务池”六列；关闭后恢复旧版六列和已完成任务面板。")
-      .addToggle((toggle) => toggle
-        .setValue(this.plugin.settings.useModernWorkflow)
-        .onChange(async (value) => {
-          this.plugin.settings.useModernWorkflow = value;
-          await this.plugin.saveSettings();
-          this.display();
-        }));
 
     new Setting(containerEl)
       .setName("扫描路径正则")
@@ -1698,7 +1545,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName(this.plugin.settings.useModernWorkflow ? "做任务标签" : "前台任务标签")
+      .setName("我做任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.foregroundTag)
         .onChange(async (value) => {
@@ -1716,7 +1563,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName(this.plugin.settings.useModernWorkflow ? "推任务标签" : "协作任务标签")
+      .setName("别人做任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.collabTag)
         .onChange(async (value) => {
@@ -1724,20 +1571,18 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
-    if (this.plugin.settings.useModernWorkflow) {
       new Setting(containerEl)
-        .setName("收任务标签")
-        .setDesc("切回旧版工作流时，带此标签的任务会并入“协作任务”。")
+        .setName("旧收任务标签（兼容）")
+        .setDesc("带此标签的任务归入“别人做”。")
         .addText((text) => text
           .setValue(this.plugin.settings.reviewTag)
           .onChange(async (value) => {
             this.plugin.settings.reviewTag = value.trim() || "#review";
             await this.plugin.saveSettings();
           }));
-    }
-
     new Setting(containerEl)
-      .setName(this.plugin.settings.useModernWorkflow ? "队列任务标签" : "入队任务标签")
+      .setName("旧队列任务标签（兼容）")
+      .setDesc("带此标签的任务归入“还没有做”。")
       .addText((text) => text
         .setValue(this.plugin.settings.inqueueTag)
         .onChange(async (value) => {
@@ -1768,9 +1613,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
 
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: this.plugin.settings.useModernWorkflow
-        ? "新版分类优先级固定为：做 > 推 > 收 > Agent > 队列 > 任务池。拖拽会先移除所有分类标签，再写入目标分类标签。"
-        : "旧版分类优先级固定为：前台 > Agent > 协作（含新版“收”）> 入队 > 任务池。拖拽会先移除所有分类标签，再写入目标分类标签。"
+      text: "分类优先级：我做 > 别人做 > agent做 > 还没有做。拖拽自动维护分类标签。"
     });
   }
 }
@@ -1785,25 +1628,12 @@ const STRICT_DATE_FORMATS = [
 ];
 
 function getBoardLayout(useModernWorkflow: boolean): Array<{ category: BoardCategory; title: string; cls: string }> {
-  if (useModernWorkflow) {
     return [
       { category: "foreground", title: MODERN_CATEGORY_LABELS.foreground, cls: "atb-q-foreground" },
       { category: "collab", title: MODERN_CATEGORY_LABELS.collab, cls: "atb-q-collab" },
-      { category: "review", title: MODERN_CATEGORY_LABELS.review, cls: "atb-q-review" },
       { category: "agent", title: MODERN_CATEGORY_LABELS.agent, cls: "atb-q-agent" },
-      { category: "inqueue", title: MODERN_CATEGORY_LABELS.inqueue, cls: "atb-q-inqueue" },
       { category: "pool", title: MODERN_CATEGORY_LABELS.pool, cls: "atb-q-pool" }
     ];
-  }
-
-  return [
-    { category: "foreground", title: LEGACY_CATEGORY_LABELS.foreground, cls: "atb-q-foreground" },
-    { category: "agent", title: LEGACY_CATEGORY_LABELS.agent, cls: "atb-q-agent" },
-    { category: "collab", title: LEGACY_CATEGORY_LABELS.collab, cls: "atb-q-collab" },
-    { category: "inqueue", title: LEGACY_CATEGORY_LABELS.inqueue, cls: "atb-q-inqueue" },
-    { category: "pool", title: LEGACY_CATEGORY_LABELS.pool, cls: "atb-q-pool" },
-    { category: "completed", title: LEGACY_CATEGORY_LABELS.completed, cls: "atb-q-completed" }
-  ];
 }
 
 function getFormattedBeijingDate(format: string): string {
@@ -1823,15 +1653,8 @@ function compilePathMatchers(patterns: string[]): RegExp[] {
 
 function classifyTask(raw: string, tags: CategoryTagMap, useModernWorkflow: boolean): Category {
   if (containsTag(raw, tags.foreground)) return "foreground";
-  if (useModernWorkflow) {
-    if (containsTag(raw, tags.collab)) return "collab";
-    if (containsTag(raw, tags.review)) return "review";
-    if (containsTag(raw, tags.agent)) return "agent";
-  } else {
-    if (containsTag(raw, tags.agent)) return "agent";
-    if (containsTag(raw, tags.collab) || containsTag(raw, tags.review)) return "collab";
-  }
-  if (containsTag(raw, tags.inqueue)) return "inqueue";
+  if (containsTag(raw, tags.collab) || containsTag(raw, tags.review)) return "collab";
+  if (containsTag(raw, tags.agent)) return "agent";
   return "pool";
 }
 
@@ -1978,10 +1801,6 @@ function parseSubtaskLine(line: string, lineOffset: number): SubtaskItem | null 
     lineOffset,
     originalLine: line
   };
-}
-
-function getActiveSubtask(subtasks: SubtaskItem[]): SubtaskItem | null {
-  return subtasks.find((subtask) => !subtask.completed) ?? null;
 }
 
 function addLocalFilePicker(container: HTMLElement, onSelect: (paths: string[]) => void) {
@@ -2165,12 +1984,6 @@ function applyTaskTags(rawText: string, tagText: string) {
 
   const existingTags = extractTags(rawText);
   const nextTags = Array.from(new Set([...existingTags, ...inputTags]));
-  return appendTags(removeAllTaskTags(rawText), nextTags);
-}
-
-function replaceTaskTags(rawText: string, tagText: string, categoryTags: CategoryTagMap) {
-  const categoryNames = new Set(Object.values(categoryTags).map((tag) => tag.replace(/^#/, "").toLowerCase()));
-  const nextTags = normalizeTagInput(tagText).filter((tag) => !categoryNames.has(tag.toLowerCase()));
   return appendTags(removeAllTaskTags(rawText), nextTags);
 }
 
@@ -2459,12 +2272,12 @@ function extractTomatoCount(raw: string) {
 function extractDate(raw: string, key: string, icons: string[]): Date | null {
   const kvRe = new RegExp(`\\b${escapeReg(key)}::?\\s*(?:\\[\\[\\s*)?(${DATE_TIME_REGEX_FRAGMENT})(?:\\s*\\]\\])?`, "i");
   const kvMatch = kvRe.exec(raw);
-  if (kvMatch) return parseDateString(kvMatch[1]);
+  if (kvMatch) return parseDateString(kvMatch[1], key === "due");
 
   for (const icon of icons) {
     const iconRe = new RegExp(`${escapeReg(icon)}\\s*(?:\\[\\[\\s*)?(${DATE_TIME_REGEX_FRAGMENT})(?:\\s*\\]\\])?`, "i");
     const iconMatch = iconRe.exec(raw);
-    if (iconMatch) return parseDateString(iconMatch[1]);
+    if (iconMatch) return parseDateString(iconMatch[1], key === "due");
   }
   return null;
 }
@@ -2475,9 +2288,9 @@ function extractCompletedDate(raw: string): Date | null {
   return extractDate(raw, "completed", []);
 }
 
-function parseDateString(value: string): Date | null {
+function parseDateString(value: string, beijing = false): Date | null {
   const parsed = moment(value.trim(), STRICT_DATE_FORMATS, true);
-  if (parsed.isValid()) return parsed.toDate();
+  if (parsed.isValid()) return (beijing ? parsed.utcOffset(480, true) : parsed).toDate();
   const iso = moment(value.trim(), moment.ISO_8601, true);
   return iso.isValid() ? iso.toDate() : null;
 }
