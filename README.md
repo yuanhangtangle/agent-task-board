@@ -6,15 +6,15 @@ The plugin scans Markdown tasks from configured files, classifies tasks by tags,
 
 ## Features
 
-- Four groups: `我做 / 别人做 / agent做 / 还没有做`.
-- Configurable category tags: `#foreground`, `#collab`, and `#agent`. Untagged and legacy `#inqueue` tasks appear in `还没有做`; legacy `#review` tasks appear in `别人做`. Existing source files do not require bulk migration.
+- Four groups: `进行中 / 验收项 / agent / 待办项`.
+- Configurable category tags: `#foreground`, `#collab`, and `#agent`. Untagged and legacy `#inqueue` tasks appear in `待办项`; legacy `#review` tasks appear in `验收项`. Existing source files do not require bulk migration.
 - Priority-based classification when multiple category tags exist on the same task.
 - Path-pattern based Markdown scanning.
 - Quick task creation into a configured inbox file.
 - Edit and delete tasks from the board.
 - Drag tasks within a column or across columns; task order is written back to Markdown.
 - Collapsed cards show title, deadline, people, and tags in one horizontally scrolling row. Category tags are hidden from cards. Expand a card to see all subtasks and attachments directly, without extra toggle buttons or a source-file row. Check or uncheck any subtask independently. Click the expanded title row to collapse the card; the checkbox and edit button keep their own actions.
-- Create tasks with a group's plus button to place them in that group. The global plus button and creation command default to `我做`; the creation dialog has no category selector.
+- Create tasks with a group's plus button to place them in that group. The global plus button and creation command default to `进行中`; the creation dialog has no category selector.
 - Complete tasks into a separate done file, including indented child lines.
 - Attachment-style child lines under tasks, with URL extraction and link buttons.
 - Filter by `#tag` and `@person`.

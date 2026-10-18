@@ -131,12 +131,12 @@ var DEFAULT_SETTINGS = {
   }
 };
 var MODERN_CATEGORY_LABELS = {
-  foreground: "\u6211\u505A",
-  collab: "\u522B\u4EBA\u505A",
-  review: "\u522B\u4EBA\u505A",
-  agent: "agent\u505A",
-  inqueue: "\u8FD8\u6CA1\u6709\u505A",
-  pool: "\u8FD8\u6CA1\u6709\u505A",
+  foreground: "\u8FDB\u884C\u4E2D",
+  collab: "\u9A8C\u6536\u9879",
+  review: "\u9A8C\u6536\u9879",
+  agent: "agent",
+  inqueue: "\u5F85\u529E\u9879",
+  pool: "\u5F85\u529E\u9879",
   completed: "\u5DF2\u5B8C\u6210"
 };
 var ACTIVE_CATEGORIES = ["foreground", "agent", "collab", "review", "inqueue", "pool"];
@@ -1316,7 +1316,7 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("\u6211\u505A\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.foregroundTag).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("\u8FDB\u884C\u4E2D\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.foregroundTag).onChange(async (value) => {
       this.plugin.settings.foregroundTag = value.trim() || "#foreground";
       await this.plugin.saveSettings();
     }));
@@ -1324,15 +1324,15 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.agentTag = value.trim() || "#agent";
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u522B\u4EBA\u505A\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.collabTag).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("\u9A8C\u6536\u9879\u4EFB\u52A1\u6807\u7B7E").addText((text) => text.setValue(this.plugin.settings.collabTag).onChange(async (value) => {
       this.plugin.settings.collabTag = value.trim() || "#collab";
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u65E7\u6536\u4EFB\u52A1\u6807\u7B7E\uFF08\u517C\u5BB9\uFF09").setDesc("\u5E26\u6B64\u6807\u7B7E\u7684\u4EFB\u52A1\u5F52\u5165\u201C\u522B\u4EBA\u505A\u201D\u3002").addText((text) => text.setValue(this.plugin.settings.reviewTag).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("\u65E7\u6536\u4EFB\u52A1\u6807\u7B7E\uFF08\u517C\u5BB9\uFF09").setDesc("\u5E26\u6B64\u6807\u7B7E\u7684\u4EFB\u52A1\u5F52\u5165\u201C\u9A8C\u6536\u9879\u201D\u3002").addText((text) => text.setValue(this.plugin.settings.reviewTag).onChange(async (value) => {
       this.plugin.settings.reviewTag = value.trim() || "#review";
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u65E7\u961F\u5217\u4EFB\u52A1\u6807\u7B7E\uFF08\u517C\u5BB9\uFF09").setDesc("\u5E26\u6B64\u6807\u7B7E\u7684\u4EFB\u52A1\u5F52\u5165\u201C\u8FD8\u6CA1\u6709\u505A\u201D\u3002").addText((text) => text.setValue(this.plugin.settings.inqueueTag).onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("\u65E7\u961F\u5217\u4EFB\u52A1\u6807\u7B7E\uFF08\u517C\u5BB9\uFF09").setDesc("\u5E26\u6B64\u6807\u7B7E\u7684\u4EFB\u52A1\u5F52\u5165\u201C\u5F85\u529E\u9879\u201D\u3002").addText((text) => text.setValue(this.plugin.settings.inqueueTag).onChange(async (value) => {
       this.plugin.settings.inqueueTag = value.trim() || "#inqueue";
       await this.plugin.saveSettings();
     }));
@@ -1346,7 +1346,7 @@ var AgentTaskBoardSettingTab = class extends import_obsidian.PluginSettingTab {
     }));
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "\u5206\u7C7B\u4F18\u5148\u7EA7\uFF1A\u6211\u505A > \u522B\u4EBA\u505A > agent\u505A > \u8FD8\u6CA1\u6709\u505A\u3002\u62D6\u62FD\u81EA\u52A8\u7EF4\u62A4\u5206\u7C7B\u6807\u7B7E\u3002"
+      text: "\u5206\u7C7B\u4F18\u5148\u7EA7\uFF1A\u8FDB\u884C\u4E2D > \u9A8C\u6536\u9879 > agent > \u5F85\u529E\u9879\u3002\u62D6\u62FD\u81EA\u52A8\u7EF4\u62A4\u5206\u7C7B\u6807\u7B7E\u3002"
     });
   }
 };

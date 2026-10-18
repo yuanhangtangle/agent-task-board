@@ -132,12 +132,12 @@ interface TaskLink {
 }
 
 const MODERN_CATEGORY_LABELS: Record<BoardCategory, string> = {
-  foreground: "我做",
-  collab: "别人做",
-  review: "别人做",
-  agent: "agent做",
-  inqueue: "还没有做",
-  pool: "还没有做",
+  foreground: "进行中",
+  collab: "验收项",
+  review: "验收项",
+  agent: "agent",
+  inqueue: "待办项",
+  pool: "待办项",
   completed: "已完成"
 };
 
@@ -1545,7 +1545,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("我做任务标签")
+      .setName("进行中任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.foregroundTag)
         .onChange(async (value) => {
@@ -1563,7 +1563,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName("别人做任务标签")
+      .setName("验收项任务标签")
       .addText((text) => text
         .setValue(this.plugin.settings.collabTag)
         .onChange(async (value) => {
@@ -1573,7 +1573,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
 
       new Setting(containerEl)
         .setName("旧收任务标签（兼容）")
-        .setDesc("带此标签的任务归入“别人做”。")
+        .setDesc("带此标签的任务归入“验收项”。")
         .addText((text) => text
           .setValue(this.plugin.settings.reviewTag)
           .onChange(async (value) => {
@@ -1582,7 +1582,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
           }));
     new Setting(containerEl)
       .setName("旧队列任务标签（兼容）")
-      .setDesc("带此标签的任务归入“还没有做”。")
+      .setDesc("带此标签的任务归入“待办项”。")
       .addText((text) => text
         .setValue(this.plugin.settings.inqueueTag)
         .onChange(async (value) => {
@@ -1613,7 +1613,7 @@ class AgentTaskBoardSettingTab extends PluginSettingTab {
 
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "分类优先级：我做 > 别人做 > agent做 > 还没有做。拖拽自动维护分类标签。"
+      text: "分类优先级：进行中 > 验收项 > agent > 待办项。拖拽自动维护分类标签。"
     });
   }
 }

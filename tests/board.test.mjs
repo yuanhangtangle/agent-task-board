@@ -35,7 +35,7 @@ const { default: Plugin, getBoardLayout, classifyTask, DEFAULT_SETTINGS, AgentTa
 test("both previous workflow settings use the same four groups", () => {
   for (const mode of [true, false]) {
     const layout = getBoardLayout(mode);
-    assert.equal(layout.map((column) => column.title).join(","), "我做,别人做,agent做,还没有做");
+    assert.equal(layout.map((column) => column.title).join(","), "进行中,验收项,agent,待办项");
   }
 });
 
