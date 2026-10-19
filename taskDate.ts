@@ -20,6 +20,10 @@ export function getBeijingDateKey(now = new Date()): string {
   return `${year}${month}${day}`;
 }
 
+export function resolveTodayTag(text: string, now = new Date()): string {
+  return text.replace(/(^|\s)#today(?![a-zA-Z0-9_/\-\u4e00-\u9fff])/gi, `$1#${getBeijingDateKey(now)}`);
+}
+
 export function matchesTaskDateFilter(taskDate: string | undefined, filter: TaskDateFilter, today: string): boolean {
   if (filter === "all") return true;
   if (!taskDate) return false;

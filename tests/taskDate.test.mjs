@@ -24,7 +24,8 @@ const {
   getBeijingDateKey,
   getDeadlineKey,
   getTaskDateTag,
-  matchesTaskDateFilter
+  matchesTaskDateFilter,
+  resolveTodayTag
 } = module.exports;
 
 test("getTaskDateTag finds the first valid #YYYYMMDD tag value", () => {
@@ -38,6 +39,15 @@ test("getTaskDateTag finds the first valid #YYYYMMDD tag value", () => {
 test("getBeijingDateKey uses Asia/Shanghai even across UTC date boundaries", () => {
   assert.equal(getBeijingDateKey(new Date("2026-07-29T16:30:00.000Z")), "20260730");
   assert.equal(getBeijingDateKey(new Date("2026-07-29T15:59:59.000Z")), "20260729");
+});
+
+test("today tags resolve at save time using the Beijing calendar and exact tag boundaries", () => {
+  const before = new Date("2026-10-18T15:59:59Z");
+  const after = new Date("2026-10-18T16:00:00Z");
+  assert.equal(resolveTodayTag("Work #today @alice #project", before), "Work #20261018 @alice #project");
+  assert.equal(resolveTodayTag("#today #TODAY", after), "#20261019 #20261019");
+  const ordinary = "#todayish #today/project #today-task #today_foo #today中文 https://example.com/#today";
+  assert.equal(resolveTodayTag(ordinary, after), ordinary);
 });
 
 test("task date filters distinguish today, overdue, future, and undated tasks", () => {

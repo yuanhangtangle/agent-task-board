@@ -58,6 +58,9 @@ function getBeijingDateKey(now = /* @__PURE__ */ new Date()) {
   if (!year || !month || !day) throw new Error("\u65E0\u6CD5\u83B7\u53D6\u5317\u4EAC\u65F6\u95F4");
   return `${year}${month}${day}`;
 }
+function resolveTodayTag(text, now = /* @__PURE__ */ new Date()) {
+  return text.replace(/(^|\s)#today(?![a-zA-Z0-9_/\-\u4e00-\u9fff])/gi, `$1#${getBeijingDateKey(now)}`);
+}
 function matchesTaskDateFilter(taskDate, filter, today) {
   if (filter === "all") return true;
   if (!taskDate) return false;
@@ -309,7 +312,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
     return tasks;
   }
   async createTask(text, category, targetFilePath, subtaskText = "", attachmentText = "", tagText = "") {
-    const cleaned = applyTaskTags(text, tagText).trim();
+    const cleaned = resolveTodayTag(applyTaskTags(text, tagText)).trim();
     if (!cleaned) return;
     const path = normalizePath(targetFilePath || this.settings.inboxFile);
     if (!path) {
@@ -328,7 +331,7 @@ var AgentTaskBoardPlugin = class extends import_obsidian.Plugin {
   }
   async updateTask(task, rawText, subtaskText, attachmentText) {
     const categoryTags = this.getCategoryTags();
-    const nextRaw = rawText.trim();
+    const nextRaw = resolveTodayTag(rawText).trim();
     if (!nextRaw) {
       new import_obsidian.Notice("\u4EFB\u52A1\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A");
       return;

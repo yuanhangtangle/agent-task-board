@@ -19,6 +19,7 @@ The plugin scans Markdown tasks from configured files, classifies tasks by tags,
 - Attachment-style child lines under tasks, with URL extraction and link buttons.
 - Filter by `#tag` and `@person`.
 - Enter tags, people, and deadlines in the first task field, e.g. `Ship release #project @alice #20261018` or `Ship release @alice due::2026-10-18`. There is no separate tag field.
+- On task creation or editing, `#today` is saved as the current Beijing date tag (`#YYYYMMDD`). The saved date stays fixed on later days.
 - Deadlines support `#YYYYMMDD`, `due::YYYY-MM-DD`, and `📅 YYYY-MM-DD`. An explicit deadline takes precedence over a date tag. Dates use Asia/Shanghai.
 - Overdue cards have red accents; cards due today have orange accents, including when collapsed. Reminders refresh across midnight.
 - Filter by `最紧急` (overdue plus today), `今天到期`, `已逾期`, `本周到期` (Sunday through Saturday), or `未来7天` (today through six days from today). Date-filtered results show earlier deadlines first; unfiltered tasks retain manual order.

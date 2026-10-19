@@ -99,6 +99,29 @@ test("merging all six old categories is read only and keeps every task block", a
   }
 });
 
+test("creation and editing persist today as a concrete date tag", async () => {
+  const plugin = new Plugin();
+  plugin.settings = { ...DEFAULT_SETTINGS };
+  plugin.refreshView = () => {};
+  const file = new TFile("Tasks/Inbox.md");
+  let content = "";
+  plugin.ensureMarkdownFile = async () => file;
+  plugin.app = { vault: {
+    getMarkdownFiles: () => [file], cachedRead: async () => content,
+    process: async (_, transform) => { content = transform(content); }
+  } };
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()).replace(/-/g, "");
+  await plugin.createTask("Work #today #project @alice", "foreground", file.path);
+  const [created] = await plugin.collectTasks();
+  assert.equal(created.taskDate, today);
+  assert.equal(created.tags.includes("today"), false);
+  await plugin.updateTask(created, "Updated #today #project @bob", "", "");
+  const [updated] = await plugin.collectTasks();
+  assert.equal(updated.taskDate, today);
+  assert.equal(updated.tags.includes("today"), false);
+  assert.equal(updated.collaborators.join(","), "bob");
+});
+
 test("cross-file moves keep source on failure and preserve children on success", async () => {
   const plugin = new Plugin();
   plugin.settings = { ...DEFAULT_SETTINGS };

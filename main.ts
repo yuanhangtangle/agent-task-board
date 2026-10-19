@@ -19,6 +19,7 @@ import {
   getDeadlineKey,
   getTaskDateTag,
   matchesTaskDateFilter,
+  resolveTodayTag,
   type TaskDateFilter
 } from "./taskDate";
 
@@ -339,7 +340,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
   }
 
   async createTask(text: string, category: Category, targetFilePath?: string, subtaskText = "", attachmentText = "", tagText = "") {
-    const cleaned = applyTaskTags(text, tagText).trim();
+    const cleaned = resolveTodayTag(applyTaskTags(text, tagText)).trim();
     if (!cleaned) return;
 
     const path = normalizePath(targetFilePath || this.settings.inboxFile);
@@ -361,7 +362,7 @@ export default class AgentTaskBoardPlugin extends Plugin {
 
   async updateTask(task: TaskItem, rawText: string, subtaskText: string, attachmentText: string) {
     const categoryTags = this.getCategoryTags();
-    const nextRaw = rawText.trim();
+    const nextRaw = resolveTodayTag(rawText).trim();
     if (!nextRaw) {
       new Notice("任务内容不能为空");
       return;
